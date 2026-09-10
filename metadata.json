@@ -1,0 +1,6 @@
+{
+  "name": "Conveyor Belt Health Monitoring Dashboard",
+  "description": "Intelligent Conveyor Belt Health Monitoring and Predictive Maintenance Dashboard for the iron ore mining industry with Digital Twin and AI visual inspection.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
