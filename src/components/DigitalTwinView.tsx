@@ -71,9 +71,9 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
       : 'healthy';
 
   const joint1Severity: Severity =
-    prediction.final_score >= 70
+    prediction.final_score > 70
       ? 'critical'
-      : prediction.final_score >= 40
+      : prediction.final_score > 40
       ? 'warning'
       : 'healthy';
 
@@ -710,6 +710,19 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
               className="cursor-pointer transition-transform hover:scale-110"
               onClick={() => handleComponentClick('joint_1')}
             >
+              {recentlyChanged['joint_1'] && (
+                <rect
+                  x="462"
+                  y="162"
+                  width="51"
+                  height="36"
+                  rx="6"
+                  fill="none"
+                  stroke={getColor(joint1Severity)}
+                  strokeWidth="3.5"
+                  className="status-change-halo"
+                />
+              )}
               {/* Splice band overlay */}
               <rect
                 x="470"
@@ -720,6 +733,7 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
                 fill="#1e293b"
                 stroke={getColor(joint1Severity)}
                 strokeWidth="3"
+                className={joint1Severity === 'critical' ? 'crit-pulse' : ''}
               />
               <line x1="480" y1="172" x2="480" y2="188" stroke={getColor(joint1Severity)} strokeWidth="2" strokeDasharray="2 2" />
               <line x1="495" y1="172" x2="495" y2="188" stroke={getColor(joint1Severity)} strokeWidth="2" strokeDasharray="2 2" />

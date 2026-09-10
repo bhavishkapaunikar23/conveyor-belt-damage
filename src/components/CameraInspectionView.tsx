@@ -1,13 +1,19 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Video,
   Scan,
   Cpu,
   Layers,
   Sparkles,
+  AlertTriangle,
 } from 'lucide-react';
-import { CameraInspection, SensorData, CombinedPrediction } from '../types';
-import { INITIAL_CAMERA_FRAMES, evaluateCombinedPrediction } from '../utils/conveyorLogic';
+import { CameraInspection, SensorData, CombinedPrediction, Severity } from '../types';
+import {
+  INITIAL_CAMERA_FRAMES,
+  evaluateCombinedPrediction,
+  calculateSensorRiskScore,
+  getContributingFactors,
+} from '../utils/conveyorLogic';
 import { AnimatedNumber } from './AnimatedNumber';
 
 interface CameraInspectionViewProps {
@@ -21,13 +27,26 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
 }) => {
   const [frames, setFrames] = useState<CameraInspection[]>(INITIAL_CAMERA_FRAMES);
   const [activeFrame, setActiveFrame] = useState<CameraInspection>(INITIAL_CAMERA_FRAMES[1]);
-  const [useWebcam, setUseWebcam] = useState<boolean>(false);
+  const [feedMode, setFeedMode] = useState<'recorded' | 'live'>('recorded');
+  const [cameraStatus, setCameraStatus] = useState<'Normal' | 'Minor Wear' | 'Crack Detected'>('Normal');
+  const [liveAnomalyScore, setLiveAnomalyScore] = useState<number>(0);
   const [isScanning, setIsScanning] = useState<boolean>(true);
-  const [webcamError, setWebcamError] = useState<string | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [videoLoadError, setVideoLoadError] = useState<boolean>(false);
   const [cctvTimestamp, setCctvTimestamp] = useState<string>('');
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Rolling baseline of edge counts for automatic anomaly detection (~25 frames)
+  const baselineEdgeCountsRef = useRef<number[]>([]);
+  // Debounce counter: sustained for at least 2 consecutive analysis cycles
+  const candidateStatusRef = useRef<{ status: 'Normal' | 'Minor Wear' | 'Crack Detected'; count: number }>({
+    status: 'Normal',
+    count: 0,
+  });
+  const currentCameraStatusRef = useRef<'Normal' | 'Minor Wear' | 'Crack Detected'>('Normal');
 
   // Live CCTV timestamp updater
   useEffect(() => {
@@ -46,37 +65,133 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  // Compute combined prediction based on current sensorData and activeFrame
-  const combined = evaluateCombinedPrediction(sensorData, activeFrame);
+  // 4. Combined Score Function (connects Camera → Digital Twin)
+  const handleCameraDetection = useCallback(
+    (
+      status: 'Normal' | 'Minor Wear' | 'Crack Detected',
+      confidence: number,
+      customBbox?: { x: number; y: number; width: number; height: number; label: string }
+    ) => {
+      // 1. Convert camera status into a camera risk score: Crack Detected → 90, Minor Wear → 40, Normal → 0
+      const cameraScore = status === 'Crack Detected' ? 90 : status === 'Minor Wear' ? 40 : 0;
 
-  // Sync back to parent when combined prediction changes
-  useEffect(() => {
-    if (onUpdateCombinedPrediction) {
-      onUpdateCombinedPrediction(combined);
-    }
-  }, [sensorData, activeFrame]);
+      // 2. Combine with existing sensor-based risk score: finalScore = (0.6 * sensorRiskScore) + (0.4 * cameraScore)
+      const sensorRisk = calculateSensorRiskScore(sensorData);
+      const finalScore = Math.round((0.6 * sensorRisk + 0.4 * cameraScore) * 10) / 10;
 
-  // Handle Webcam Start/Stop
+      // 3. Map finalScore to status: >70 = Critical, 40–70 = Warning, <40 = Healthy
+      const finalStatus: 'Critical' | 'Warning' | 'Healthy' =
+        finalScore > 70 ? 'Critical' : finalScore > 40 ? 'Warning' : 'Healthy';
+
+      setCameraStatus(status);
+      setLiveAnomalyScore(confidence);
+      currentCameraStatusRef.current = status;
+
+      const now = new Date();
+      const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+      const mappedDefectType: CameraInspection['defect_type'] =
+        status === 'Crack Detected'
+          ? 'Deep Splice Separation'
+          : status === 'Minor Wear'
+          ? 'Surface Micro-Crack'
+          : 'No Defect / Clean Surface';
+
+      const frameStatus: CameraInspection['status'] =
+        finalStatus === 'Critical'
+          ? 'Critical Damage'
+          : finalStatus === 'Warning'
+          ? 'Minor Damage'
+          : 'Normal';
+
+      const updatedFrame: CameraInspection = {
+        id: `cam-${Date.now()}`,
+        timestamp: timeStr,
+        status: frameStatus,
+        defect_type: mappedDefectType,
+        confidence: confidence > 0 ? Math.round(confidence * 10) / 10 : 98.4,
+        camera_risk_score: cameraScore,
+        bbox: status === 'Normal' ? undefined : customBbox,
+        imageUrl: activeFrame.imageUrl,
+        beltLocation: 'Line-Scan Optical Cam #1 - Vulcanized Joint #1',
+      };
+
+      setActiveFrame(updatedFrame);
+      setFrames((prev) => [updatedFrame, ...prev.slice(0, 5)]);
+
+      // 4. Update Digital Twin component via existing combined prediction callback
+      if (onUpdateCombinedPrediction) {
+        const combinedResult: CombinedPrediction = {
+          final_score: finalScore,
+          sensor_risk_score: sensorRisk,
+          camera_risk_score: cameraScore,
+          status: finalStatus,
+          failure_probability: Math.min(99, Math.max(3, Math.round(finalScore * 0.95))),
+          rul_hours: finalScore > 70 ? 12 : finalScore > 40 ? 96 : 580,
+          contributing_factors: [
+            ...(cameraScore > 0
+              ? [
+                  {
+                    name: `Optical Camera: ${status}`,
+                    factor_key: 'camera_visual',
+                    impact_percent: Math.round((cameraScore * 0.4 / (finalScore || 1)) * 100),
+                    current_value: cameraScore,
+                    threshold_exceeded: `${confidence > 0 ? confidence.toFixed(1) : '98.4'}% confidence`,
+                    severity: (finalStatus === 'Critical' ? 'critical' : 'warning') as Severity,
+                  },
+                ]
+              : []),
+            ...getContributingFactors(sensorData),
+          ],
+          camera_defect: mappedDefectType,
+          camera_confidence: confidence > 0 ? Math.round(confidence * 10) / 10 : 98.4,
+          recommendation:
+            finalStatus === 'Critical'
+              ? 'CRITICAL DEFECT DETECTED BY CAMERA: Splice tear risk on Joint #1. Immediate stop required.'
+              : finalStatus === 'Warning'
+              ? 'WARNING: Camera inspection identified belt surface wear on Joint #1. Schedule NDT inspection.'
+              : 'Conveyor belt operating within nominal parameters. Optical line-scan clean.',
+          timestamp: new Date().toISOString(),
+        };
+        onUpdateCombinedPrediction(combinedResult);
+      }
+    },
+    [sensorData, onUpdateCombinedPrediction, activeFrame.imageUrl]
+  );
+
+  // Handle Feed Mode switching (Recorded vs Live Webcam)
   useEffect(() => {
-    if (useWebcam) {
-      navigator.mediaDevices
-        ?.getUserMedia({ video: { width: 640, height: 480 } })
-        .then((stream) => {
-          streamRef.current = stream;
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.play().catch(() => {});
-          }
-          setWebcamError(null);
-        })
-        .catch(() => {
-          setWebcamError('Webcam access was denied or device not found. Reverting to high-speed conveyor feed simulation.');
-          setUseWebcam(false);
-        });
+    if (feedMode === 'live') {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then((stream) => {
+            streamRef.current = stream;
+            if (videoRef.current) {
+              videoRef.current.srcObject = stream;
+              videoRef.current.play().catch(() => {});
+            }
+            setCameraError(null);
+          })
+          .catch(() => {
+            setCameraError('Camera access unavailable');
+            // Gracefully fall back to Recorded Feed mode automatically
+            setFeedMode('recorded');
+          });
+      } else {
+        setCameraError('Camera access unavailable');
+        setFeedMode('recorded');
+      }
     } else {
+      // Recorded feed mode: release any active webcam stream
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+        videoRef.current.src = './assets/belt-inspection.mp4';
+        videoRef.current.play().catch(() => {});
       }
     }
 
@@ -85,31 +200,142 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [useWebcam]);
+  }, [feedMode]);
 
-  const handleSimulateDefect = (
-    defect: CameraInspection['defect_type'],
-    status: CameraInspection['status'],
-    risk: number,
-    bbox?: { x: number; y: number; width: number; height: number; label: string }
-  ) => {
-    const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-    const newFrame: CameraInspection = {
-      id: `cam-${Date.now()}`,
-      timestamp: timeStr,
-      status,
-      defect_type: defect,
-      confidence: Math.round((88 + Math.random() * 10) * 10) / 10,
-      camera_risk_score: risk,
-      bbox,
-      imageUrl: activeFrame.imageUrl,
-      beltLocation: 'Optical Line Scanner #1 - Splice Bay',
-    };
+  // Automatic Frame Analysis Engine (Canvas + Sobel Edge Filter + Rolling Baseline)
+  useEffect(() => {
+    // Runs periodically every 450ms while video is playing
+    const interval = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || video.paused) return;
 
-    setActiveFrame(newFrame);
-    setFrames((prev) => [newFrame, ...prev.slice(0, 5)]);
-  };
+      const canvas = analysisCanvasRef.current;
+      if (!canvas) return;
+
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+
+      // Downscale to 160x90 for fast, non-blocking edge/anomaly detection
+      canvas.width = 160;
+      canvas.height = 90;
+      ctx.drawImage(video, 0, 0, 160, 90);
+
+      try {
+        const frame = ctx.getImageData(0, 0, 160, 90);
+        const { data, width, height } = frame;
+
+        // 1. Grayscale conversion
+        const gray = new Uint8ClampedArray(width * height);
+        for (let i = 0; i < width * height; i++) {
+          gray[i] = (data[i * 4] * 77 + data[i * 4 + 1] * 150 + data[i * 4 + 2] * 29) >> 8;
+        }
+
+        // 2. Sobel Edge Filter & Grid Cell Density Tracking (8 cols x 5 rows)
+        const gridCols = 8;
+        const gridRows = 5;
+        const cellW = width / gridCols;
+        const cellH = height / gridRows;
+        const cellEdgeCounts = new Array(gridCols * gridRows).fill(0);
+
+        let totalEdges = 0;
+        let maxCellCount = 0;
+        let maxCellIdx = 0;
+
+        // Skip 3px outer border to avoid camera boundary edge artifacts
+        for (let y = 3; y < height - 3; y++) {
+          const cy = Math.floor(y / cellH);
+          for (let x = 3; x < width - 3; x++) {
+            const idx = y * width + x;
+            const gx =
+              -gray[idx - width - 1] + gray[idx - width + 1] -
+              2 * gray[idx - 1] + 2 * gray[idx + 1] -
+              gray[idx + width - 1] + gray[idx + width + 1];
+            const gy =
+              -gray[idx - width - 1] - 2 * gray[idx - width] - gray[idx - width + 1] +
+              gray[idx + width - 1] + 2 * gray[idx + width] + gray[idx + width + 1];
+            const mag = Math.abs(gx) + Math.abs(gy);
+
+            if (mag > 80) {
+              totalEdges++;
+              const cx = Math.floor(x / cellW);
+              const cIdx = cy * gridCols + cx;
+              cellEdgeCounts[cIdx]++;
+              if (cellEdgeCounts[cIdx] > maxCellCount) {
+                maxCellCount = cellEdgeCounts[cIdx];
+                maxCellIdx = cIdx;
+              }
+            }
+          }
+        }
+
+        // 3. Rolling Baseline (average the last ~25 quiet frames)
+        const baselineBuf = baselineEdgeCountsRef.current;
+        let baselineAvg = totalEdges;
+        if (baselineBuf.length > 0) {
+          baselineAvg = baselineBuf.reduce((a, b) => a + b, 0) / baselineBuf.length;
+        } else {
+          baselineBuf.push(totalEdges);
+        }
+
+        // Add to baseline if quiet or initializing
+        const ratio = totalEdges / Math.max(10, baselineAvg);
+        if (ratio < 1.35 || baselineBuf.length < 8) {
+          baselineBuf.push(totalEdges);
+          if (baselineBuf.length > 25) {
+            baselineBuf.shift();
+          }
+        }
+
+        // Compute relative deviation from baseline & hotspot concentration
+        const deviation = (totalEdges - baselineAvg) / Math.max(15, baselineAvg);
+        const concentration = maxCellCount / Math.max(1, totalEdges);
+
+        let anomalyScore = 0;
+        let rawStatus: 'Normal' | 'Minor Wear' | 'Crack Detected' = 'Normal';
+
+        if (deviation > 0.65 || (deviation > 0.40 && concentration > 0.28)) {
+          anomalyScore = Math.min(98, Math.round(72 + Math.min(26, deviation * 30)));
+          rawStatus = 'Crack Detected';
+        } else if (deviation > 0.25 || (deviation > 0.15 && concentration > 0.22)) {
+          anomalyScore = Math.min(70, Math.max(36, Math.round(38 + deviation * 60)));
+          rawStatus = 'Minor Wear';
+        } else {
+          anomalyScore = Math.max(0, Math.min(30, Math.round(Math.max(0, deviation) * 80)));
+          rawStatus = 'Normal';
+        }
+
+        // 4. Debounce result: sustained for at least 2 consecutive analysis cycles
+        if (candidateStatusRef.current.status === rawStatus) {
+          candidateStatusRef.current.count += 1;
+        } else {
+          candidateStatusRef.current = { status: rawStatus, count: 1 };
+        }
+
+        if (candidateStatusRef.current.count >= 2 && currentCameraStatusRef.current !== rawStatus) {
+          const maxCx = maxCellIdx % gridCols;
+          const maxCy = Math.floor(maxCellIdx / gridCols);
+          const bbox =
+            rawStatus !== 'Normal'
+              ? {
+                  x: Math.max(8, Math.min(68, Math.round((maxCx / gridCols) * 100))),
+                  y: Math.max(12, Math.min(64, Math.round((maxCy / gridRows) * 100))),
+                  width: 25,
+                  height: 28,
+                  label: rawStatus === 'Crack Detected' ? 'Crack / Tear Detected' : 'Surface Wear Band',
+                }
+              : undefined;
+
+          handleCameraDetection(rawStatus, rawStatus === 'Normal' ? 0 : anomalyScore, bbox);
+        }
+      } catch (err) {
+        // Silently handle any frame read errors (e.g., cross-origin security guards)
+      }
+    }, 450);
+
+    return () => clearInterval(interval);
+  }, [handleCameraDetection]);
+
+  const combined = evaluateCombinedPrediction(sensorData, activeFrame);
 
   const getStatusBadge = (status: CameraInspection['status']) => {
     switch (status) {
@@ -211,7 +437,7 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="w-2 h-2 rounded-full bg-[var(--status-critical)] animate-soft-pulse shrink-0" />
               <span className="font-semibold text-[var(--text-primary)] truncate">
-                {useWebcam ? 'LIVE WEBCAM STREAM' : 'LINE-SCAN OPTICAL CAM #1 (60 FPS)'}
+                {feedMode === 'live' ? 'LIVE CAMERA (WEBCAM FEED)' : 'RECORDED FEED (OPTICAL LINE-SCAN)'}
               </span>
               <span className="text-[var(--text-tertiary)] font-mono text-[11px] hidden sm:inline">
                 {activeFrame.beltLocation}
@@ -219,18 +445,32 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              <button
-                id="btn-toggle-webcam"
-                onClick={() => setUseWebcam(!useWebcam)}
-                className={`px-2.5 py-1 rounded-[6px] text-[12px] font-medium flex items-center gap-1.5 transition-colors ${
-                  useWebcam
-                    ? 'bg-[var(--accent-primary)] text-[#0A0E14] font-bold'
-                    : 'btn-secondary h-[28px]'
-                }`}
-              >
-                <Video className="w-3.5 h-3.5" />
-                <span>{useWebcam ? 'Simulated Feed' : 'Use Webcam'}</span>
-              </button>
+              {/* 1. Feed Source Toggle: Recorded Feed vs Live Camera */}
+              <div className="flex items-center rounded-[6px] bg-[var(--bg-base)] p-0.5 border border-[var(--border-subtle)]">
+                <button
+                  id="btn-feed-recorded"
+                  onClick={() => setFeedMode('recorded')}
+                  className={`px-2.5 py-1 rounded-[4px] text-[12px] font-medium transition-colors ${
+                    feedMode === 'recorded'
+                      ? 'bg-[var(--bg-surface-raised)] text-[var(--text-primary)] font-semibold shadow-sm'
+                      : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
+                  }`}
+                >
+                  Recorded Feed
+                </button>
+                <button
+                  id="btn-feed-live"
+                  onClick={() => setFeedMode('live')}
+                  className={`px-2.5 py-1 rounded-[4px] text-[12px] font-medium flex items-center gap-1.5 transition-colors ${
+                    feedMode === 'live'
+                      ? 'bg-[var(--accent-primary)] text-[#0A0E14] font-bold shadow-sm'
+                      : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
+                  }`}
+                >
+                  <Video className="w-3 h-3" />
+                  <span>Live Camera</span>
+                </button>
+              </div>
 
               <button
                 onClick={() => setIsScanning(!isScanning)}
@@ -241,13 +481,16 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
                 }`}
               >
                 <Scan className="w-3.5 h-3.5" />
-                <span>{isScanning ? 'AI Grid Active' : 'AI Hidden'}</span>
+                <span>{isScanning ? 'Vision HUD' : 'HUD Off'}</span>
               </button>
             </div>
           </div>
 
-          {/* Video / Image Display */}
+          {/* Video / Camera Display Area */}
           <div className="relative aspect-video bg-black flex items-center justify-center overflow-hidden">
+            {/* Hidden analysis canvas for non-blocking heuristic edge & anomaly detection */}
+            <canvas ref={analysisCanvasRef} className="hidden" aria-hidden="true" />
+
             {/* CCTV Live Broadcast & REC Overlay */}
             <div className="absolute top-3 right-3 z-20 flex items-center gap-2 px-2.5 py-1 rounded-[6px] bg-black/80 border border-white/10 backdrop-blur-sm pointer-events-none">
               <span className="w-2 h-2 rounded-full bg-[var(--status-critical)] animate-soft-pulse" />
@@ -257,20 +500,33 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
               </span>
             </div>
 
-            {useWebcam ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <img
-                src={activeFrame.imageUrl}
-                alt="Conveyor belt surface inspection feed"
-                className="w-full h-full object-cover filter contrast-125 brightness-95"
-              />
+            {/* Video player for both Recorded Feed and Live Camera */}
+            <video
+              ref={videoRef}
+              src={feedMode === 'recorded' ? './assets/belt-inspection.mp4' : undefined}
+              autoPlay
+              loop={feedMode === 'recorded'}
+              playsInline
+              muted
+              crossOrigin="anonymous"
+              onError={() => {
+                if (feedMode === 'recorded') setVideoLoadError(true);
+              }}
+              onLoadedData={() => setVideoLoadError(false)}
+              className="w-full h-full object-cover"
+            />
+
+            {/* Fallback image if video fails to load */}
+            {videoLoadError && feedMode === 'recorded' && (
+              <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-6 text-center z-10">
+                <AlertTriangle className="w-8 h-8 text-[var(--status-warning)] mb-2" />
+                <p className="text-[13px] text-[var(--text-primary)] font-medium">
+                  Recorded feed (assets/belt-inspection.mp4) unavailable
+                </p>
+                <p className="text-[11px] text-[var(--text-tertiary)] font-mono mt-1">
+                  Place belt-inspection.mp4 in /public/assets/
+                </p>
+              </div>
             )}
 
             {/* Laser Line Pulse Animation */}
@@ -278,10 +534,10 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
               <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-[var(--status-critical)] to-transparent shadow-[0_0_12px_var(--status-critical)] animate-soft-pulse pointer-events-none top-1/3" />
             )}
 
-            {/* Bounding Box Overlay */}
+            {/* Bounding Box Overlay for detected anomalies */}
             {isScanning && activeFrame.bbox && (
               <div
-                className="absolute border-2 border-[var(--status-critical)] bg-[rgba(241,54,54,0.15)] pointer-events-none shadow-[0_0_16px_rgba(241,54,54,0.4)]"
+                className="absolute border-2 border-[var(--status-critical)] bg-[rgba(241,54,54,0.15)] pointer-events-none shadow-[0_0_16px_rgba(241,54,54,0.4)] transition-all duration-300"
                 style={{
                   left: `${activeFrame.bbox.x}%`,
                   top: `${activeFrame.bbox.y}%`,
@@ -307,82 +563,76 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
             <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-[11px] font-mono text-[var(--text-secondary)] bg-black/75 backdrop-blur-sm px-3.5 py-1.5 rounded-[6px] border border-white/10 pointer-events-none">
               <div className="flex items-center gap-4">
                 <span>FPS: 59.8</span>
-                <span>EXP: 1/4000s</span>
-                <span>RES: 2048x1080</span>
+                <span>STATUS: {cameraStatus}</span>
+                <span>ANOMALY: {liveAnomalyScore.toFixed(0)}</span>
               </div>
               <div className="text-[var(--accent-primary)] font-bold">
                 SPEED SYNC: {sensorData.belt_speed.toFixed(2)} m/s
               </div>
             </div>
 
-            {webcamError && (
-              <div className="absolute inset-0 bg-black/85 flex items-center justify-center p-6 text-center text-[13px] text-[var(--status-warning)]">
-                {webcamError}
+            {/* Inline warning for camera failure */}
+            {cameraError && (
+              <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-black/90 border border-[rgba(245,158,11,0.5)] px-4 py-2 rounded-[8px] text-[12px] text-[var(--status-warning)] z-30 shadow-lg flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4" />
+                <span>{cameraError} — Reverted to Recorded Feed</span>
               </div>
             )}
           </div>
 
-          {/* Bottom Bar: Defect Injection Buttons */}
+          {/* Bottom Bar: Manual Simulate Detection Buttons (always available alongside automatic engine) */}
           <div className="p-[16px] bg-[var(--bg-surface-raised)] border-t border-[var(--border-subtle)]">
-            <div className="text-[12px] font-medium text-[var(--text-tertiary)] uppercase tracking-[0.06em] mb-2.5 flex items-center gap-2">
-              <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-              <span>Inject Vision Scenarios:</span>
+            <div className="text-[12px] font-medium text-[var(--text-tertiary)] uppercase tracking-[0.06em] mb-2.5 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                <span>Simulate Detection Controls (Manual Demo Override):</span>
+              </div>
+              <span className="text-[11px] text-[var(--text-tertiary)] font-mono lowercase">
+                auto-engine active (450ms)
+              </span>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
               <button
-                onClick={() => handleSimulateDefect('No Defect / Clean Surface', 'Normal', 5, undefined)}
-                className="p-2.5 rounded-[6px] bg-[var(--bg-surface)] hover:bg-[var(--border-subtle)] border border-[var(--border-subtle)] text-left transition-colors"
-              >
-                <div className="text-[12px] font-semibold text-[var(--status-healthy)]">✓ Clean Surface</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Risk: 5%</div>
-              </button>
-
-              <button
+                id="btn-simulate-crack"
                 onClick={() =>
-                  handleSimulateDefect('Surface Micro-Crack', 'Minor Damage', 35, {
-                    x: 35,
-                    y: 40,
-                    width: 25,
-                    height: 20,
+                  handleCameraDetection('Crack Detected', 91, {
+                    x: 36,
+                    y: 34,
+                    width: 28,
+                    height: 30,
                     label: 'Crack Detected',
                   })
                 }
-                className="p-2.5 rounded-[6px] bg-[var(--bg-surface)] hover:bg-[var(--border-subtle)] border border-[var(--border-subtle)] text-left transition-colors"
+                className="p-2.5 rounded-[6px] bg-[var(--status-critical-bg)] hover:bg-opacity-80 border border-[rgba(241,54,54,0.4)] text-left transition-colors"
               >
-                <div className="text-[12px] font-semibold text-[var(--status-warning)]">⚠️ Micro-Crack</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Risk: 35%</div>
+                <div className="text-[12px] font-semibold text-[var(--status-critical)]">🔴 Simulate Crack Detection</div>
+                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Camera: 90 | Conf: 91%</div>
               </button>
 
               <button
+                id="btn-simulate-wear"
                 onClick={() =>
-                  handleSimulateDefect('Longitudinal Gouge', 'Minor Damage', 45, {
-                    x: 20,
-                    y: 28,
-                    width: 48,
-                    height: 18,
-                    label: 'Gouge (3.2mm)',
+                  handleCameraDetection('Minor Wear', 55, {
+                    x: 30,
+                    y: 38,
+                    width: 32,
+                    height: 22,
+                    label: 'Minor Wear',
                   })
                 }
-                className="p-2.5 rounded-[6px] bg-[var(--bg-surface)] hover:bg-[var(--border-subtle)] border border-[var(--border-subtle)] text-left transition-colors"
+                className="p-2.5 rounded-[6px] bg-[var(--status-warning-bg)] hover:bg-opacity-80 border border-[rgba(245,158,11,0.4)] text-left transition-colors"
               >
-                <div className="text-[12px] font-semibold text-[var(--status-warning)]">⚠️ Belt Gouge</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Risk: 45%</div>
+                <div className="text-[12px] font-semibold text-[var(--status-warning)]">⚠️ Simulate Minor Wear</div>
+                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Camera: 40 | Conf: 55%</div>
               </button>
 
               <button
-                onClick={() =>
-                  handleSimulateDefect('Deep Splice Separation', 'Critical Damage', 88, {
-                    x: 18,
-                    y: 35,
-                    width: 60,
-                    height: 38,
-                    label: 'Splice Delamination',
-                  })
-                }
-                className="p-2.5 rounded-[6px] bg-[var(--status-critical-bg)] hover:bg-opacity-80 border border-[rgba(241,54,54,0.3)] text-left transition-colors"
+                id="btn-simulate-normal"
+                onClick={() => handleCameraDetection('Normal', 0)}
+                className="p-2.5 rounded-[6px] bg-[var(--bg-surface)] hover:bg-[var(--border-subtle)] border border-[var(--border-subtle)] text-left transition-colors"
               >
-                <div className="text-[12px] font-semibold text-[var(--status-critical)]">🔴 Splice Tear</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Risk: 88%</div>
+                <div className="text-[12px] font-semibold text-[var(--status-healthy)]">✓ Reset to Normal</div>
+                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Camera: 0 | Nominal Surface</div>
               </button>
             </div>
           </div>

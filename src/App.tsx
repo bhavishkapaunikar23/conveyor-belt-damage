@@ -320,7 +320,16 @@ export default function App() {
             {currentPage === 'camera' && (
               <CameraInspectionView
                 sensorData={sensorData}
-                onUpdateCombinedPrediction={(pred) => setPrediction(pred)}
+                onUpdateCombinedPrediction={(pred) => {
+                  setPrediction(pred);
+                  setActiveCamera((prev) => ({
+                    ...prev,
+                    status: pred.status === 'Critical' ? 'Critical Damage' : pred.status === 'Warning' ? 'Minor Damage' : 'Normal',
+                    camera_risk_score: pred.camera_risk_score,
+                    defect_type: pred.camera_defect || prev.defect_type,
+                    confidence: pred.camera_confidence ?? prev.confidence,
+                  }));
+                }}
               />
             )}
 
