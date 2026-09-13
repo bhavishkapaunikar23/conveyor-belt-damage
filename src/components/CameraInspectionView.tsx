@@ -3,7 +3,6 @@ import {
   Video,
   Scan,
   Cpu,
-  Layers,
   Sparkles,
   AlertTriangle,
   Upload,
@@ -16,7 +15,6 @@ import { CameraInspection, SensorData, CombinedPrediction } from '../types';
 import {
   evaluateCombinedPrediction,
 } from '../utils/conveyorLogic';
-import { AnimatedNumber } from './AnimatedNumber';
 import { useCameraFeed } from '../context/CameraFeedContext';
 
 interface CameraInspectionViewProps {
@@ -38,7 +36,6 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
     cctvTimestamp,
     detection,
     liveAnomalyScore,
-    frames,
     activeFrame,
     videoRef,
     analysisCanvasRef,
@@ -46,7 +43,6 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
     setIsScanning,
     handleVideoUpload,
     handleLoadSampleVideo,
-    setActiveFrame,
     triggerManualDefectTest,
   } = useCameraFeed();
 
@@ -70,7 +66,73 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
     }
   };
 
-  const combined = evaluateCombinedPrediction(sensorData, activeFrame);
+  // Structured defect detection specs lookup keyed by detection type
+  const defectSpecsByType: Record<string, string[]> = {
+    "Material Spillage": [
+      "Outer Region Spillage: Left/Right Flange Margin Scan — ACTIVE (triggered this detection)",
+      "Tracking Asymmetry: Lateral Differential Analysis — monitoring",
+      "Debounce Window: 2 consecutive cycles (~760ms)"
+    ],
+    "Crack / Tear": [
+      "Belt Surface Crack: High-frequency Sobel Filter — ACTIVE (triggered this detection)",
+      "Outer Region Spillage: Left/Right Flange Margin Scan — monitoring",
+      "Debounce Window: 2 consecutive cycles (~760ms)"
+    ],
+    "Edge Wear": [
+      "Tracking Asymmetry: Lateral Differential Analysis — ACTIVE (triggered this detection)",
+      "Belt Surface Crack: High-frequency Sobel Filter — monitoring",
+      "Debounce Window: 2 consecutive cycles (~760ms)"
+    ],
+    "Normal": [
+      "All scans running: Flange Margin Scan, Sobel Filter, Lateral Differential Analysis",
+      "No anomaly above threshold in current window",
+      "Debounce Window: 2 consecutive cycles (~760ms)"
+    ]
+  };
+
+  // Structured maintenance recommendation lookup based on type and risk score
+  const getMaintenanceRecommendation = (type: string, riskScore: number): string => {
+    const recommendations: Record<string, string> = {
+      "Material Spillage": riskScore > 70
+        ? "CRITICAL: Significant material spillage at belt flange — stop feed rate, inspect skirt rubber and flange seals immediately to prevent continued material loss and potential belt tracking failure."
+        : "WARNING: Material spillage detected at belt edge — check skirt board rubber seal and loading chute alignment at next inspection window.",
+      "Crack / Tear": riskScore > 70
+        ? "CRITICAL: Belt surface crack detected — potential splice failure risk. Halt operation and perform immediate visual/manual inspection before resuming."
+        : "WARNING: Early-stage surface crack indicators detected. Schedule non-destructive testing (NDT) at next shift break and verify belt tension take-up.",
+      "Edge Wear": "WARNING: Belt tracking asymmetry detected — check idler alignment and edge guide rollers; uneven wear may accelerate if uncorrected.",
+      "Normal": "No action required. Belt surface and tracking within normal parameters."
+    };
+    return recommendations[type] || recommendations["Normal"];
+  };
+
+  const normalizeDefectType = (rawType?: string): 'Normal' | 'Material Spillage' | 'Crack / Tear' | 'Edge Wear' => {
+    if (!rawType) return 'Normal';
+    if (rawType.includes('Spillage')) return 'Material Spillage';
+    if (rawType.includes('Crack') || rawType.includes('Tear') || rawType.includes('Splice')) return 'Crack / Tear';
+    if (rawType.includes('Wear') || rawType.includes('Misalignment')) return 'Edge Wear';
+    return 'Normal';
+  };
+
+  const getConditionLabel = (rawType?: string): string => {
+    if (!rawType) return 'Normal / Clean Surface';
+    if (rawType.includes('Spillage')) return 'Material Spillage / Skirt Overflow';
+    if (rawType.includes('Crack') || rawType.includes('Tear') || rawType.includes('Splice')) return 'Crack / Tear';
+    if (rawType.includes('Misalignment')) return 'Tracking Misalignment';
+    if (rawType.includes('Wear')) return 'Edge Wear';
+    return 'Normal / Clean Surface';
+  };
+
+  // Derive dynamic live analysis panel data from current detection state
+  const currentCategory = normalizeDefectType(detection?.defectType || activeFrame?.defect_type);
+  const currentCondition = getConditionLabel(detection?.defectType || activeFrame?.defect_type);
+  const currentConfidence = detection?.confidence ?? activeFrame?.confidence ?? 98;
+  const currentCameraRisk = detection?.cameraScore ?? activeFrame?.camera_risk_score ?? 0;
+  const currentTimestamp = detection?.timestamp || activeFrame?.timestamp || cctvTimestamp || 'Live';
+  const currentLocation = detection?.location || activeFrame?.beltLocation || 'Joint 1 — Transfer Point (Cam #1)';
+  const currentSpecs = defectSpecsByType[currentCategory] || defectSpecsByType['Normal'];
+  const currentRecommendation = getMaintenanceRecommendation(currentCategory, currentCameraRisk);
+  const currentStatus: CameraInspection['status'] =
+    currentCameraRisk >= 60 ? 'Critical Damage' : currentCameraRisk >= 30 ? 'Minor Damage' : 'Normal';
 
   const getStatusBadge = (status: CameraInspection['status']) => {
     switch (status) {
@@ -109,74 +171,7 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
         className="hidden"
       />
 
-      {/* 1. Formula & Weighted Fusion Banner */}
-      <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-[12px] p-[24px] shadow-[var(--shadow-card)]">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="px-2 py-0.5 rounded-[4px] text-[11px] font-semibold bg-[var(--accent-primary-muted)] text-[var(--accent-primary)] border border-[rgba(245,165,36,0.3)] font-mono uppercase">
-                Sensor-Vision Fusion
-              </span>
-              <h1 className="text-[20px] font-semibold text-[var(--text-primary)] tracking-tight">
-                Combined Rupture Risk Index
-              </h1>
-            </div>
-            <p className="text-[13px] text-[var(--text-tertiary)] font-mono">
-              Composite Equation: (0.60 × Sensor Telemetry) + (0.40 × Optical Line-Scan)
-            </p>
-          </div>
-
-          {/* Breakdown Equation Cards */}
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="px-3.5 py-2 rounded-[8px] bg-[var(--bg-surface-raised)] border border-[var(--border-subtle)]">
-              <div className="text-[11px] uppercase tracking-[0.06em] text-[var(--text-tertiary)] font-medium">
-                Sensor Risk (60%)
-              </div>
-              <div className="text-[20px] font-bold font-mono tabular-nums text-[var(--text-primary)] mt-0.5">
-                <AnimatedNumber value={combined.sensor_risk_score} decimals={1} />
-                <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">/ 100</span>
-              </div>
-            </div>
-
-            <span className="text-[var(--text-disabled)] font-bold text-base">+</span>
-
-            <div className="px-3.5 py-2 rounded-[8px] bg-[var(--bg-surface-raised)] border border-[var(--border-subtle)]">
-              <div className="text-[11px] uppercase tracking-[0.06em] text-[var(--text-tertiary)] font-medium">
-                Camera Risk (40%)
-              </div>
-              <div className="text-[20px] font-bold font-mono tabular-nums text-[var(--accent-primary)] mt-0.5">
-                <AnimatedNumber value={combined.camera_risk_score} decimals={1} />
-                <span className="text-[11px] text-[var(--text-tertiary)] font-normal ml-1">/ 100</span>
-              </div>
-            </div>
-
-            <span className="text-[var(--text-disabled)] font-bold text-base">=</span>
-
-            <div
-              className={`px-4 py-2 rounded-[8px] border flex items-center gap-3 ${
-                combined.final_score >= 60
-                  ? 'bg-[var(--status-critical-bg)] border-[rgba(241,54,54,0.4)] text-[var(--status-critical)]'
-                  : combined.final_score >= 30
-                  ? 'bg-[var(--status-warning-bg)] border-[rgba(245,158,11,0.4)] text-[var(--status-warning)]'
-                  : 'bg-[var(--status-healthy-bg)] border-[rgba(16,185,129,0.4)] text-[var(--status-healthy)]'
-              }`}
-            >
-              <div>
-                <div className="text-[11px] uppercase font-semibold tracking-[0.06em]">Composite Risk</div>
-                <div className="text-[22px] font-bold font-mono tabular-nums leading-none mt-0.5">
-                  <AnimatedNumber value={combined.final_score} decimals={1} />
-                  <span className="text-[11px] font-normal ml-1">/ 100</span>
-                </div>
-              </div>
-              <span className="px-2.5 py-1 rounded-[6px] text-[12px] font-bold border bg-[var(--bg-base)]">
-                {combined.status}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 2. Main Camera Feed & Edge Analysis Grid */}
+      {/* Main Camera Feed & Edge Analysis Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* Left 8 Cols: Camera Viewport */}
         <div className="lg:col-span-8 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-[12px] overflow-hidden shadow-[var(--shadow-card)] flex flex-col justify-between">
@@ -505,22 +500,22 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
                 <Cpu className="w-4 h-4 text-[var(--accent-primary)]" />
                 <span>Live Frame Analysis</span>
               </h2>
-              {getStatusBadge(activeFrame.status)}
+              {getStatusBadge(currentStatus)}
             </div>
 
             <div className="space-y-3 text-[13px]">
               <div className="bg-[var(--bg-surface-raised)] p-3 rounded-[8px] border border-[var(--border-subtle)] space-y-2">
                 <div className="flex justify-between">
                   <span className="text-[var(--text-tertiary)]">Condition:</span>
-                  <span className="font-semibold text-[var(--text-primary)]">{activeFrame.defect_type}</span>
+                  <span className="font-semibold text-[var(--text-primary)]">{currentCondition}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--text-tertiary)]">Confidence:</span>
-                  <span className="font-mono font-bold text-[var(--accent-primary)]">{activeFrame.confidence}%</span>
+                  <span className="font-mono font-bold text-[var(--accent-primary)]">{currentConfidence}%</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--text-tertiary)]">Camera Risk:</span>
-                  <span className="font-mono font-bold text-[var(--status-critical)]">{activeFrame.camera_risk_score}/100</span>
+                  <span className="font-mono font-bold text-[var(--status-critical)]">{currentCameraRisk}/100</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--text-tertiary)]">Source:</span>
@@ -528,17 +523,18 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--text-tertiary)]">Timestamp:</span>
-                  <span className="font-mono text-[var(--text-secondary)]">{activeFrame.timestamp}</span>
+                  <span className="font-mono text-[var(--text-secondary)]">{currentTimestamp}</span>
                 </div>
               </div>
 
               {/* Edge Inference Spec */}
               <div className="p-3 rounded-[8px] bg-[var(--bg-surface-raised)] border border-[var(--border-subtle)] text-[12px] space-y-1 text-[var(--text-secondary)]">
                 <div className="font-semibold text-[var(--text-primary)]">Defect Detection Specs:</div>
-                <div>• Outer Region Spillage: Left/Right Flange Margin Scan</div>
-                <div>• Belt Surface Crack: High-frequency Sobel Filter</div>
-                <div>• Tracking Asymmetry: Lateral Differential Analysis</div>
-                <div>• Debounce Window: 2 consecutive cycles (~760ms)</div>
+                {currentSpecs.map((spec, idx) => (
+                  <div key={idx} className={spec.includes('ACTIVE') ? 'text-[var(--accent-primary)] font-medium' : ''}>
+                    • {spec}
+                  </div>
+                ))}
               </div>
 
               {/* Action Recommendation */}
@@ -546,72 +542,15 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
                 <strong className="block font-semibold text-[var(--accent-primary)] mb-1">
                   Maintenance Recommendation:
                 </strong>
-                <span className="text-[var(--text-primary)]">{combined.recommendation}</span>
+                <span className="text-[var(--text-primary)]">{currentRecommendation}</span>
               </div>
             </div>
           </div>
 
           <div className="pt-3 border-t border-[var(--border-subtle)] text-[11px] text-[var(--text-tertiary)] flex items-center justify-between font-mono">
-            <span>Location: {activeFrame.beltLocation}</span>
+            <span>Location: {currentLocation}</span>
             <span>ID: {activeFrame.id}</span>
           </div>
-        </div>
-      </div>
-
-      {/* 3. Thumbnail Gallery (6 Frames) */}
-      <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-[12px] p-[20px] shadow-[var(--shadow-card)] space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Layers className="w-4 h-4 text-[var(--accent-primary)]" />
-            <h2 className="text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--text-tertiary)]">
-              Historical Inspection Frames Gallery
-            </h2>
-          </div>
-          <span className="text-[11px] text-[var(--text-tertiary)] font-mono">Click thumbnail to inspect</span>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          {frames.map((frame) => {
-            const isSelected = frame.id === activeFrame.id;
-            return (
-              <div
-                key={frame.id}
-                onClick={() => setActiveFrame(frame)}
-                className={`group cursor-pointer bg-[var(--bg-surface-raised)] rounded-[8px] overflow-hidden border transition-all ${
-                  isSelected
-                    ? 'border-[var(--accent-primary)] ring-2 ring-[rgba(245,165,36,0.3)]'
-                    : 'border-[var(--border-subtle)] hover:border-[var(--border-default)]'
-                }`}
-              >
-                <div className="relative aspect-video bg-black overflow-hidden">
-                  <img
-                    src={frame.imageUrl}
-                    alt={frame.defect_type}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                  />
-                  <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded-[4px] bg-black/80 font-mono text-[9px] text-[var(--text-secondary)]">
-                    {frame.timestamp}
-                  </div>
-                  {frame.bbox && (
-                    <div className="absolute top-1 left-1 px-1 py-0.2 rounded-[3px] bg-[var(--status-critical)] text-[8px] font-bold text-white uppercase">
-                      Defect
-                    </div>
-                  )}
-                </div>
-                <div className="p-2 space-y-0.5">
-                  <div className="text-[12px] font-medium text-[var(--text-primary)] truncate">
-                    {frame.defect_type}
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-[var(--text-tertiary)] font-mono">
-                    <span>{frame.confidence}%</span>
-                    <span className={frame.camera_risk_score >= 60 ? 'text-[var(--status-critical)] font-bold' : ''}>
-                      R:{frame.camera_risk_score}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>

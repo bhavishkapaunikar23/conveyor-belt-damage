@@ -50,7 +50,7 @@ const DEFAULT_DETECTION: CameraDefectInfo = {
   anomalyScore: 10,
   defectLabel: 'Nominal Belt Surface — Clean Tracking',
   timestamp: 'Just now',
-  location: 'Joint 1 — Transfer Point / Skirtboard',
+  location: 'Joint 1 — Transfer Point (Cam #1)',
   severity: 'Healthy',
   cameraScore: 0,
 };
@@ -69,7 +69,7 @@ const FALLBACK_CONTEXT_VALUE: CameraFeedContextType = {
   detection: DEFAULT_DETECTION,
   liveAnomalyScore: 10,
   frames: INITIAL_CAMERA_FRAMES,
-  activeFrame: INITIAL_CAMERA_FRAMES[1],
+  activeFrame: INITIAL_CAMERA_FRAMES[0],
   videoRef: { current: null },
   analysisCanvasRef: { current: null },
   setFeedMode: () => {},
@@ -103,7 +103,7 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
   onUpdateCombinedPrediction,
 }) => {
   const [frames, setFrames] = useState<CameraInspection[]>(INITIAL_CAMERA_FRAMES);
-  const [activeFrame, setActiveFrame] = useState<CameraInspection>(INITIAL_CAMERA_FRAMES[1]);
+  const [activeFrame, setActiveFrame] = useState<CameraInspection>(INITIAL_CAMERA_FRAMES[0]);
   const [feedMode, setFeedMode] = useState<'recorded' | 'live'>('recorded');
   const [isScanning, setIsScanning] = useState<boolean>(true);
   const [cameraError, setCameraError] = useState<string | null>(null);
