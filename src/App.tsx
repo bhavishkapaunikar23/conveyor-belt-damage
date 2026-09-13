@@ -30,6 +30,8 @@ import { SystemIntegrationView } from './components/SystemIntegrationView';
 import { HistoricalReportsView } from './components/HistoricalReportsView';
 import { ComponentDetailModal } from './components/ComponentDetailModal';
 import { AlertToastContainer, ToastAlert } from './components/AlertToastContainer';
+import { CameraFeedProvider, CameraDefectInfo } from './context/CameraFeedContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const INITIAL_ACTIVITY_EVENTS: ActivityEvent[] = [
   {
@@ -265,124 +267,150 @@ export default function App() {
 
   const activeAlertCount = alerts.filter((a) => a.status === 'Active').length;
 
+  const handleUpdateCameraPrediction = useCallback((pred: CombinedPrediction) => {
+    setPrediction(pred);
+    setActiveCamera((prev) => ({
+      ...prev,
+      status: pred.status === 'Critical' ? 'Critical Damage' : pred.status === 'Warning' ? 'Minor Damage' : 'Normal',
+      camera_risk_score: pred.camera_risk_score,
+      defect_type: (pred.camera_defect as CameraInspection['defect_type']) || prev.defect_type,
+      confidence: pred.camera_confidence ?? prev.confidence,
+    }));
+  }, []);
+
+  const handleDefectDetected = useCallback((defect: CameraDefectInfo) => {
+    if (defect.defectType !== 'Normal') {
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      setActivityEvents((prev) => [
+        {
+          id: `evt-defect-${Date.now()}`,
+          timestamp: timeStr,
+          source: 'Camera',
+          message: `${defect.defectLabel} (${defect.confidence}% confidence) detected at optical camera station`,
+          level: defect.defectType === 'Crack/Tear' ? 'critical' : 'warning',
+        },
+        ...prev.slice(0, 19),
+      ]);
+    }
+  }, []);
+
   return (
-    <div className="flex h-screen bg-[var(--bg-base)] text-[var(--text-primary)] font-sans overflow-hidden">
-      {/* 1. Left Sidebar Navigation */}
-      <Sidebar
-        currentPage={currentPage}
-        onSelectPage={setCurrentPage}
-        activeAlertCount={activeAlertCount}
-        overallHealthScore={overallHealthScore}
-        selectedConveyor={selectedConveyor}
-        onSelectConveyor={setSelectedConveyor}
-        isStreaming={isStreaming}
-      />
+    <ErrorBoundary>
+      <CameraFeedProvider
+        sensorData={sensorData}
+        onDefectDetected={handleDefectDetected}
+        onUpdateCombinedPrediction={handleUpdateCameraPrediction}
+      >
+        <div className="flex h-screen bg-[var(--bg-base)] text-[var(--text-primary)] font-sans overflow-hidden">
+          {/* 1. Left Sidebar Navigation */}
+          <Sidebar
+            currentPage={currentPage}
+            onSelectPage={setCurrentPage}
+            activeAlertCount={activeAlertCount}
+            overallHealthScore={overallHealthScore}
+            selectedConveyor={selectedConveyor}
+            onSelectConveyor={setSelectedConveyor}
+            isStreaming={isStreaming}
+          />
 
-      {/* 2. Main Content Area */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden bg-[var(--bg-base)]">
-        {/* Top Header Simulation & Control Bar */}
-        <TopHeader
-          currentPage={currentPage}
-          isStreaming={isStreaming}
-          onToggleStreaming={() => setIsStreaming(!isStreaming)}
-          onTriggerAnomaly={(mode) => setAnomalyMode(mode)}
-          pollIntervalMs={pollIntervalMs}
-          onChangePollInterval={setPollIntervalMs}
-          selectedConveyor={selectedConveyor}
-          onManualRefresh={stepSimulation}
-          beltSpeed={sensorData.belt_speed}
-        />
+          {/* 2. Main Content Area */}
+          <div className="flex-1 flex flex-col h-full overflow-hidden bg-[var(--bg-base)]">
+            {/* Top Header Simulation & Control Bar */}
+            <TopHeader
+              currentPage={currentPage}
+              isStreaming={isStreaming}
+              onToggleStreaming={() => setIsStreaming(!isStreaming)}
+              onTriggerAnomaly={(mode) => setAnomalyMode(mode)}
+              pollIntervalMs={pollIntervalMs}
+              onChangePollInterval={setPollIntervalMs}
+              selectedConveyor={selectedConveyor}
+              onManualRefresh={stepSimulation}
+              beltSpeed={sensorData.belt_speed}
+            />
 
-        {/* View Routing Body with Scroll */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 bg-[var(--bg-base)]">
-          <div className="max-w-7xl mx-auto">
-            {currentPage === 'overview' && (
-              <OverviewView
-                sensorData={sensorData}
-                prediction={prediction}
-                activeAlertCount={activeAlertCount}
-                overallHealthScore={overallHealthScore}
-                onNavigate={setCurrentPage}
-                selectedConveyor={selectedConveyor}
-                activityEvents={activityEvents}
-              />
-            )}
+            {/* View Routing Body with Scroll */}
+            <main className="flex-1 overflow-y-auto p-4 md:p-6 bg-[var(--bg-base)]">
+              <div className="max-w-7xl mx-auto">
+                {currentPage === 'overview' && (
+                  <OverviewView
+                    sensorData={sensorData}
+                    prediction={prediction}
+                    activeAlertCount={activeAlertCount}
+                    overallHealthScore={overallHealthScore}
+                    onNavigate={setCurrentPage}
+                    selectedConveyor={selectedConveyor}
+                    activityEvents={activityEvents}
+                  />
+                )}
 
-            {currentPage === 'realtime' && (
-              <RealtimeSensorsView
-                sensorData={sensorData}
-                history={history}
-                overallHealthScore={overallHealthScore}
-                sensorRiskScore={sensorRiskScore}
-              />
-            )}
+                {currentPage === 'realtime' && (
+                  <RealtimeSensorsView
+                    sensorData={sensorData}
+                    history={history}
+                    overallHealthScore={overallHealthScore}
+                    sensorRiskScore={sensorRiskScore}
+                  />
+                )}
 
-            {currentPage === 'camera' && (
-              <CameraInspectionView
-                sensorData={sensorData}
-                onUpdateCombinedPrediction={(pred) => {
-                  setPrediction(pred);
-                  setActiveCamera((prev) => ({
-                    ...prev,
-                    status: pred.status === 'Critical' ? 'Critical Damage' : pred.status === 'Warning' ? 'Minor Damage' : 'Normal',
-                    camera_risk_score: pred.camera_risk_score,
-                    defect_type: pred.camera_defect || prev.defect_type,
-                    confidence: pred.camera_confidence ?? prev.confidence,
-                  }));
-                }}
-              />
-            )}
+                {currentPage === 'camera' && (
+                  <CameraInspectionView
+                    sensorData={sensorData}
+                    onUpdateCombinedPrediction={handleUpdateCameraPrediction}
+                  />
+                )}
 
-            {currentPage === 'digital-twin' && (
-              <DigitalTwinView
-                sensorData={sensorData}
-                prediction={prediction}
-                onSelectComponent={(comp) => setSelectedComponent(comp)}
-              />
-            )}
+                {currentPage === 'digital-twin' && (
+                  <DigitalTwinView
+                    sensorData={sensorData}
+                    prediction={prediction}
+                    onSelectComponent={(comp) => setSelectedComponent(comp)}
+                  />
+                )}
 
-            {currentPage === 'predictions' && (
-              <PredictiveAnalyticsView
-                sensorData={sensorData}
-                prediction={prediction}
-                activeCamera={activeCamera}
-                onRefreshPrediction={(custom) => {
-                  if (custom) {
-                    setPrediction(custom);
-                  } else {
-                    setPrediction(evaluateCombinedPrediction(sensorData, activeCamera));
-                  }
-                }}
-              />
-            )}
+                {currentPage === 'predictions' && (
+                  <PredictiveAnalyticsView
+                    sensorData={sensorData}
+                    prediction={prediction}
+                    activeCamera={activeCamera}
+                    onRefreshPrediction={(custom) => {
+                      if (custom) {
+                        setPrediction(custom);
+                      } else {
+                        setPrediction(evaluateCombinedPrediction(sensorData, activeCamera));
+                      }
+                    }}
+                  />
+                )}
 
-            {currentPage === 'alerts' && (
-              <AlertsView
-                alerts={alerts}
-                onAcknowledgeAlert={handleAcknowledgeAlert}
-                onResolveAlert={handleResolveAlert}
-              />
-            )}
+                {currentPage === 'alerts' && (
+                  <AlertsView
+                    alerts={alerts}
+                    onAcknowledgeAlert={handleAcknowledgeAlert}
+                    onResolveAlert={handleResolveAlert}
+                  />
+                )}
 
-            {currentPage === 'integrations' && <SystemIntegrationView />}
+                {currentPage === 'integrations' && <SystemIntegrationView />}
 
-            {currentPage === 'history' && <HistoricalReportsView />}
+                {currentPage === 'history' && <HistoricalReportsView />}
+              </div>
+            </main>
           </div>
-        </main>
-      </div>
 
-      {/* Live Toast Alerts */}
-      <AlertToastContainer
-        toasts={toasts}
-        onDismiss={(toastId) => setToasts((prev) => prev.filter((t) => t.toastId !== toastId))}
-        onNavigateToAlerts={() => setCurrentPage('alerts')}
-      />
+          {/* Live Toast Alerts */}
+          <AlertToastContainer
+            toasts={toasts}
+            onDismiss={(toastId) => setToasts((prev) => prev.filter((t) => t.toastId !== toastId))}
+            onNavigateToAlerts={() => setCurrentPage('alerts')}
+          />
 
-      {/* Detail Modal for Selected Component */}
-      <ComponentDetailModal
-        component={selectedComponent}
-        onClose={() => setSelectedComponent(null)}
-      />
-    </div>
+          {/* Detail Modal for Selected Component */}
+          <ComponentDetailModal
+            component={selectedComponent}
+            onClose={() => setSelectedComponent(null)}
+          />
+        </div>
+      </CameraFeedProvider>
+    </ErrorBoundary>
   );
 }

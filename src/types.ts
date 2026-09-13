@@ -58,16 +58,30 @@ export interface SensorPrediction {
   method: 'Random Forest Classifier' | 'Rule-based Fallback Model';
 }
 
+export type DefectCategory =
+  | 'Normal'
+  | 'Material Spillage'
+  | 'Crack/Tear'
+  | 'Misalignment/Edge Wear';
+
 export interface CameraInspection {
   id: string;
   timestamp: string;
   status: 'Normal' | 'Minor Damage' | 'Critical Damage';
-  defect_type: 'No Defect / Clean Surface' | 'Surface Micro-Crack' | 'Deep Splice Separation' | 'Longitudinal Gouge' | 'Edge Fraying / Tear';
+  defect_type:
+    | 'No Defect / Clean Surface'
+    | 'Surface Micro-Crack'
+    | 'Deep Splice Separation'
+    | 'Longitudinal Gouge'
+    | 'Edge Fraying / Tear'
+    | 'Material Spillage / Skirt Overflow'
+    | 'Tracking Misalignment / Edge Wear';
   confidence: number; // e.g. 91%
   camera_risk_score: number; // 0-100
   bbox?: { x: number; y: number; width: number; height: number; label: string };
   imageUrl: string;
   beltLocation: string; // e.g. "Section C - Joint #2 Splice"
+  snapshotUrl?: string;
 }
 
 export interface CombinedPrediction {

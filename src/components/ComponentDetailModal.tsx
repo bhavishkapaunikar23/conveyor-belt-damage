@@ -123,14 +123,47 @@ export const ComponentDetailModal: React.FC<ComponentDetailModalProps> = ({
           </div>
         </div>
 
-        {/* Optical Camera Inspection Status */}
+        {/* Optical Camera Inspection Status & Captured Frame Snapshot */}
         <div className="space-y-1.5">
-          <div className="flex items-center gap-2 text-[12px] font-semibold text-[var(--text-primary)]">
-            <Camera className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-            <span>Computer Vision Surface Inspection:</span>
+          <div className="flex items-center justify-between text-[12px] font-semibold text-[var(--text-primary)]">
+            <div className="flex items-center gap-2">
+              <Camera className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+              <span>Computer Vision Surface Inspection:</span>
+            </div>
+            {component.cameraDefectType && component.cameraDefectType !== 'Normal' && (
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase font-mono ${
+                  component.cameraDefectType === 'Material Spillage'
+                    ? 'bg-orange-950/80 text-orange-400 border border-orange-500/40'
+                    : component.cameraDefectType === 'Crack/Tear'
+                    ? 'bg-red-950/80 text-red-400 border border-red-500/40'
+                    : 'bg-amber-950/80 text-amber-400 border border-amber-500/40'
+                }`}
+              >
+                {component.cameraDefectType} ({component.cameraConfidence}%)
+              </span>
+            )}
           </div>
-          <div className="bg-[var(--bg-surface-raised)] p-3 rounded-[8px] border border-[var(--border-subtle)] text-[12px] text-[var(--text-secondary)] leading-[1.5]">
-            {component.cameraStatus}
+          <div className="bg-[var(--bg-surface-raised)] p-3 rounded-[8px] border border-[var(--border-subtle)] text-[12px] text-[var(--text-secondary)] leading-[1.5] space-y-2">
+            <div>{component.cameraStatus}</div>
+            {component.cameraSnapshotUrl && (
+              <div className="mt-2 pt-2 border-t border-[var(--border-subtle)] space-y-1">
+                <div className="text-[11px] font-mono text-[var(--text-tertiary)] flex items-center justify-between">
+                  <span>Captured Frame Snapshot at Detection Moment:</span>
+                  <span className="text-[var(--accent-primary)]">{component.cameraLocation || 'Joint 1'}</span>
+                </div>
+                <div className="relative aspect-video max-h-48 w-full bg-black rounded-[6px] overflow-hidden border border-white/10">
+                  <img
+                    src={component.cameraSnapshotUrl}
+                    alt="Captured inspection frame"
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute top-1.5 left-1.5 px-2 py-0.5 rounded bg-black/80 font-mono text-[10px] text-white">
+                    Optical Snapshot
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

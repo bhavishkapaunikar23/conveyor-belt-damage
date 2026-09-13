@@ -13,6 +13,8 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { SensorData, CombinedPrediction, Severity } from '../types';
+import { Conveyor3DScene } from './Conveyor3DScene';
+import { useCameraFeed } from '../context/CameraFeedContext';
 
 interface DigitalTwinViewProps {
   sensorData: SensorData;
@@ -31,6 +33,10 @@ export interface SelectedTwinComponent {
   recommendation: string;
   lastService: string;
   cycles: string;
+  cameraDefectType?: string;
+  cameraConfidence?: number;
+  cameraSnapshotUrl?: string;
+  cameraLocation?: string;
 }
 
 export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
@@ -38,6 +44,7 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
   prediction,
   onSelectComponent,
 }) => {
+  const { detection } = useCameraFeed();
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [showFlowParticles, setShowFlowParticles] = useState<boolean>(true);
   const [activeHighlight, setActiveHighlight] = useState<string | null>(null);
@@ -70,12 +77,17 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
       ? 'warning'
       : 'healthy';
 
-  const joint1Severity: Severity =
-    prediction.final_score > 70
+  // Joint #1 is directly monitored by Optical Camera #1
+  const cameraDefectOnJ1 = detection.defectType !== 'Normal';
+  const joint1Severity: Severity = cameraDefectOnJ1
+    ? detection.defectType === 'Crack/Tear'
       ? 'critical'
-      : prediction.final_score > 40
-      ? 'warning'
-      : 'healthy';
+      : 'warning'
+    : prediction.final_score > 70
+    ? 'critical'
+    : prediction.final_score > 40
+    ? 'warning'
+    : 'healthy';
 
   const beltSurfaceSeverity: Severity =
     prediction.final_score >= 60
@@ -241,24 +253,47 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
         });
         break;
 
-      case 'joint_1':
+      case 'joint_1': {
+        const isDefect = detection.defectType !== 'Normal';
         onSelectComponent({
           id: 'JNT-01-SPL',
-          name: 'Belt Splice Joint #1 (Finger Step Splice)',
-          type: 'Reinforced Rubber Splice Joint',
-          status: joint1Severity,
-          healthScore: Math.round(100 - prediction.final_score * 0.8),
+          name: 'Belt Splice Joint #1 & Transfer Chute (Optical Cam #1)',
+          type: 'Reinforced Rubber Splice & Transfer Point',
+          status: isDefect
+            ? detection.defectType === 'Crack/Tear'
+              ? 'critical'
+              : 'warning'
+            : joint1Severity,
+          healthScore: isDefect
+            ? Math.max(15, 100 - detection.anomalyScore)
+            : Math.round(100 - prediction.final_score * 0.8),
           readings: {
             'Surface Acoustic Pulse': '82 pts',
-            'Splice Tensile Strain': `${(sensorData.overload * 0.42).toFixed(1)} kN/m`,
-            'Edge Skive Integrity': 'Nominal',
+            'Optical Anomaly Score': `${detection.anomalyScore.toFixed(0)} / 100`,
+            'Defect Classification': detection.defectType,
+            'Detection Confidence': `${detection.confidence}%`,
+            'Camera Station': 'Line-Scan Optical Camera #1 (Joint 1 / Skirtboard)',
           },
-          cameraStatus: 'No edge fraying detected in last line-scan capture.',
-          recommendation: 'Nominal fatigue status. Continue monitoring via automated line cameras.',
+          cameraStatus: isDefect
+            ? `${detection.defectLabel} (${detection.confidence}% confidence) detected at optical camera inspection station.`
+            : 'No surface anomalies or edge tears detected in current video inspection.',
+          recommendation:
+            detection.defectType === 'Material Spillage'
+              ? 'MATERIAL SPILLAGE WARNING: Pellet overflow detected along conveyor skirtboard near Joint #1 / Transfer chute. Inspect polyurethane skirt seals and adjust impact chute deflector.'
+              : detection.defectType === 'Crack/Tear'
+              ? 'CRITICAL TEAR: Longitudinal splice tear detected at Joint #1 vulcanization seam. Stop line immediately to prevent full belt rupture.'
+              : detection.defectType === 'Misalignment/Edge Wear'
+              ? 'WARNING: Edge wear / tracking misalignment detected. Inspect tracking idlers and belt guide rollers.'
+              : 'Nominal fatigue status. Continue monitoring via automated line cameras.',
           lastService: '68 days ago',
           cycles: '189,000 cycles',
+          cameraDefectType: detection.defectType,
+          cameraConfidence: detection.confidence,
+          cameraSnapshotUrl: detection.snapshotUrl,
+          cameraLocation: 'Joint 1 — Transfer Point (Cam #1)',
         });
         break;
+      }
 
       case 'tail_pulley':
         onSelectComponent({
@@ -320,10 +355,10 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
             </span>
           </div>
           <h1 className="text-[20px] font-semibold text-[var(--text-primary)] tracking-tight">
-            Interactive 2D Conveyor Belt Digital Twin
+            Interactive 3D Conveyor Belt Digital Twin
           </h1>
           <p className="text-[13px] text-[var(--text-secondary)] max-w-2xl leading-[1.6]">
-            Real-time multi-physics schematic synced to live telemetry velocity ({sensorData.belt_speed.toFixed(2)} m/s) and joint stress. Select any mechanical node below to inspect deep telemetry.
+            Real-time multi-physics 3D kinematic twin synced to live telemetry velocity ({sensorData.belt_speed.toFixed(2)} m/s), tensioner sag, and optical camera joint defect sensing. Drag to orbit, scroll to zoom, and select any mechanical component to inspect deep telemetry.
           </p>
         </div>
 
@@ -367,533 +402,30 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
           </div>
         </div>
 
-        {/* 2D SVG Interactive Diagram */}
-        <div className="w-full overflow-x-auto">
-          <svg
-            id="conveyor-digital-twin-svg"
-            viewBox="0 0 1100 480"
-            className="w-full min-w-[850px] h-auto select-none"
-            style={{ filter: 'drop-shadow(0 4px 20px rgba(0,0,0,0.6))' }}
-          >
-            <defs>
-              {/* Dynamic Belt Motion Pattern Animation */}
-              <style>
-                {`
-                  @keyframes beltMoveTop {
-                    0% { stroke-dashoffset: 0; }
-                    100% { stroke-dashoffset: -120; }
-                  }
-                  @keyframes beltMoveBottom {
-                    0% { stroke-dashoffset: 0; }
-                    100% { stroke-dashoffset: 120; }
-                  }
-                  @keyframes pulseRed {
-                    0%, 100% { opacity: 0.9; }
-                    50% { opacity: 0.4; }
-                  }
-                  @keyframes motorRotate {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                  }
-                  .belt-top-anim {
-                    animation: beltMoveTop ${animationDurationSec}s linear infinite;
-                  }
-                  .belt-bottom-anim {
-                    animation: beltMoveBottom ${animationDurationSec}s linear infinite;
-                  }
-                  .crit-pulse {
-                    animation: pulseRed 1s infinite;
-                  }
-                  @keyframes oreParticleMove {
-                    0% { transform: translateX(0px); opacity: 0; }
-                    8% { opacity: 0.9; }
-                    92% { opacity: 0.9; }
-                    100% { transform: translateX(-755px); opacity: 0; }
-                  }
-                  @keyframes pulseStatusHalo {
-                    0%, 100% { opacity: 0.9; transform: scale(1); }
-                    50% { opacity: 0.2; transform: scale(1.08); }
-                  }
-                  .status-change-halo {
-                    animation: pulseStatusHalo 0.6s ease-in-out infinite;
-                    transform-origin: center;
-                  }
-                `}
-              </style>
-
-              {/* Linear Gradients */}
-              <linearGradient id="metalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#334155" />
-                <stop offset="50%" stopColor="#1e293b" />
-                <stop offset="100%" stopColor="#0f172a" />
-              </linearGradient>
-
-              <linearGradient id="pulleyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#64748b" />
-                <stop offset="100%" stopColor="#1e293b" />
-              </linearGradient>
-
-              <linearGradient id="oreGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#d97706" />
-                <stop offset="100%" stopColor="#78350f" />
-              </linearGradient>
-
-              <filter id="glowGreen" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="3" result="blur" />
-                <feComposite in="SourceGraphic" in2="blur" operator="over" />
-              </filter>
-              <filter id="glowRed" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="4" result="blur" />
-                <feComposite in="SourceGraphic" in2="blur" operator="over" />
-              </filter>
-            </defs>
-
-            {/* Industrial Floor Grid Background */}
-            <g opacity="0.15">
-              <line x1="40" y1="410" x2="1060" y2="410" stroke="#64748b" strokeWidth="2" />
-              <line x1="40" y1="425" x2="1060" y2="425" stroke="#334155" strokeWidth="1" strokeDasharray="4 4" />
-              {/* Structural Truss Columns */}
-              <path d="M 120,410 L 120,280 M 340,410 L 340,280 M 560,410 L 560,280 M 780,410 L 780,280 M 960,410 L 960,280" stroke="#334155" strokeWidth="3" />
-              <path d="M 120,280 L 340,410 M 340,280 L 120,410 M 340,280 L 560,410 M 560,280 L 340,410 M 560,280 L 780,410 M 780,280 L 560,410 M 780,280 L 960,410 M 960,280 L 780,410" stroke="#1e293b" strokeWidth="1.5" />
-            </g>
-
-            {/* 1. DRIVE MOTOR UNIT (Far Left) */}
-            <g
-              id="twin-comp-motor"
-              className="cursor-pointer transition-transform hover:scale-105"
-              onClick={() => handleComponentClick('motor')}
-            >
-              {recentlyChanged['motor'] && (
-                <rect
-                  x="44"
-                  y="184"
-                  width="92"
-                  height="82"
-                  rx="10"
-                  fill="none"
-                  stroke="#f59e0b"
-                  strokeWidth="3.5"
-                  className="status-change-halo"
-                />
-              )}
-              {/* Motor Housing */}
-              <rect
-                x="50"
-                y="190"
-                width="80"
-                height="70"
-                rx="6"
-                fill="#1e293b"
-                stroke={getColor(motorSeverity)}
-                strokeWidth="3"
-                className={motorSeverity === 'critical' ? 'crit-pulse' : ''}
-              />
-              {/* Motor Cooling Fins */}
-              <line x1="58" y1="195" x2="58" y2="255" stroke="#475569" strokeWidth="2" />
-              <line x1="68" y1="195" x2="68" y2="255" stroke="#475569" strokeWidth="2" />
-              <line x1="78" y1="195" x2="78" y2="255" stroke="#475569" strokeWidth="2" />
-              <line x1="88" y1="195" x2="88" y2="255" stroke="#475569" strokeWidth="2" />
-              <line x1="98" y1="195" x2="98" y2="255" stroke="#475569" strokeWidth="2" />
-              <line x1="108" y1="195" x2="108" y2="255" stroke="#475569" strokeWidth="2" />
-              <line x1="118" y1="195" x2="118" y2="255" stroke="#475569" strokeWidth="2" />
-
-              {/* Shaft & Coupler */}
-              <rect x="130" y="218" width="30" height="14" fill="#64748b" rx="2" />
-              <rect x="145" y="214" width="10" height="22" fill="#94a3b8" rx="1" />
-
-              {/* Motor Label */}
-              <text x="90" y="278" fill="#cbd5e1" fontSize="11" fontWeight="bold" textAnchor="middle">
-                Drive Motor M-01
-              </text>
-              <text x="90" y="292" fill={getColor(motorSeverity)} fontSize="10" fontMono="true" textAnchor="middle">
-                {sensorData.temperature.toFixed(1)}°C | {sensorData.motor_current.toFixed(0)}A
-              </text>
-            </g>
-
-            {/* 2. PRIMARY HEAD DRIVE PULLEY */}
-            <g
-              id="twin-comp-drive-pulley"
-              className="cursor-pointer transition-transform hover:scale-105"
-              onClick={() => handleComponentClick('drive_pulley')}
-            >
-              {recentlyChanged['drive_pulley'] && (
-                <circle
-                  cx="195"
-                  cy="225"
-                  r="54"
-                  fill="none"
-                  stroke="#f59e0b"
-                  strokeWidth="3.5"
-                  className="status-change-halo"
-                />
-              )}
-              {/* Outer Drum */}
-              <circle
-                cx="195"
-                cy="225"
-                r="45"
-                fill="url(#pulleyGrad)"
-                stroke={getColor(drivePulleySeverity)}
-                strokeWidth="4"
-                className={drivePulleySeverity === 'critical' ? 'crit-pulse' : ''}
-              />
-              {/* Drum Spokes & Hub */}
-              <circle cx="195" cy="225" r="14" fill="#0f172a" stroke="#64748b" strokeWidth="3" />
-              <line x1="195" y1="180" x2="195" y2="270" stroke="#475569" strokeWidth="2" />
-              <line x1="150" y1="225" x2="240" y2="225" stroke="#475569" strokeWidth="2" />
-
-              {/* Bearing Pillow Block Indicator */}
-              <rect
-                x="185"
-                y="215"
-                width="20"
-                height="20"
-                rx="3"
-                fill={getColor(drivePulleySeverity)}
-                opacity="0.8"
-              />
-
-              {/* Label */}
-              <text x="195" y="165" fill="#cbd5e1" fontSize="11" fontWeight="bold" textAnchor="middle">
-                Head Drive Pulley
-              </text>
-              <text x="195" y="150" fill={getColor(drivePulleySeverity)} fontSize="10" textAnchor="middle">
-                Bearing: {sensorData.bearing_condition.toFixed(0)} pts
-              </text>
-            </g>
-
-            {/* SNUB DEFLECTION PULLEY */}
-            <g>
-              <circle cx="270" cy="285" r="24" fill="#1e293b" stroke="#64748b" strokeWidth="3" />
-              <circle cx="270" cy="285" r="7" fill="#0f172a" />
-              <text x="270" y="325" fill="#94a3b8" fontSize="9" textAnchor="middle">
-                Snub Pulley
-              </text>
-            </g>
-
-            {/* 3. TAIL RETURN PULLEY (Far Right) */}
-            <g
-              id="twin-comp-tail-pulley"
-              className="cursor-pointer transition-transform hover:scale-105"
-              onClick={() => handleComponentClick('tail_pulley')}
-            >
-              <circle
-                cx="960"
-                cy="225"
-                r="45"
-                fill="url(#pulleyGrad)"
-                stroke="#10b981"
-                strokeWidth="4"
-              />
-              <circle cx="960" cy="225" r="14" fill="#0f172a" stroke="#64748b" strokeWidth="3" />
-              <line x1="960" y1="180" x2="960" y2="270" stroke="#475569" strokeWidth="2" />
-              <line x1="915" y1="225" x2="1005" y2="225" stroke="#475569" strokeWidth="2" />
-
-              <text x="960" y="165" fill="#cbd5e1" fontSize="11" fontWeight="bold" textAnchor="middle">
-                Tail Return Pulley
-              </text>
-              <text x="960" y="150" fill="#10b981" fontSize="10" textAnchor="middle">
-                Tension: Nominal
-              </text>
-            </g>
-
-            {/* ORE LOADING CHUTE (Above Tail Pulley) */}
-            <g>
-              <polygon points="920,80 1000,80 970,165 950,165" fill="#334155" stroke="#475569" strokeWidth="2" />
-              <rect x="945" y="70" width="30" height="15" fill="#0f172a" rx="2" />
-              <text x="960" y="65" fill="#f59e0b" fontSize="10" fontWeight="bold" textAnchor="middle">
-                Ore Chute (Crusher Feed)
-              </text>
-              {/* Ore particles dropping down */}
-              {showFlowParticles && isMoving && (
-                <g fill="#d97706" opacity="0.8">
-                  <circle cx="956" cy="120" r="3" />
-                  <circle cx="965" cy="135" r="4" />
-                  <circle cx="958" cy="150" r="3.5" />
-                  <circle cx="962" cy="168" r="5" />
-                  <circle cx="952" cy="172" r="3" />
-                </g>
-              )}
-            </g>
-
-            {/* 4. CARRIER IDLER ROLLERS (Upper Strand Support) */}
-            <g opacity="0.85">
-              {[340, 430, 520, 610, 700, 790, 880].map((xPos) => (
-                <g key={xPos}>
-                  {/* Troughing idler 3-roll profile */}
-                  <line x1={xPos - 14} y1="190" x2={xPos + 14} y2="190" stroke="#64748b" strokeWidth="4" strokeLinecap="round" />
-                  <line x1={xPos - 22} y1="184" x2={xPos - 12} y2="190" stroke="#64748b" strokeWidth="3" strokeLinecap="round" />
-                  <line x1={xPos + 12} y1="190" x2={xPos + 22} y2="184" stroke="#64748b" strokeWidth="3" strokeLinecap="round" />
-                  <rect x={xPos - 2} y="192" width="4" height="15" fill="#334155" />
-                </g>
-              ))}
-            </g>
-
-            {/* 5. RETURN IDLERS (Lower Strand Support) */}
-            <g opacity="0.7">
-              {[380, 540, 700, 860].map((xPos) => (
-                <g key={xPos}>
-                  <circle cx={xPos} cy="285" r="8" fill="#1e293b" stroke="#64748b" strokeWidth="2" />
-                  <rect x={xPos - 1.5} y="293" width="3" height="12" fill="#334155" />
-                </g>
-              ))}
-            </g>
-
-            {/* 6. CONVEYOR BELT STRANDS */}
-
-            {/* TOP CARRIER STRAND (Moving Leftward) */}
-            <path
-              d="M 960,180 L 195,180"
-              stroke="#0f172a"
-              strokeWidth="12"
-              strokeLinecap="round"
-            />
-            <path
-              d="M 960,180 L 195,180"
-              stroke={getColor(beltSurfaceSeverity)}
-              strokeWidth="4"
-              strokeDasharray={isMoving ? '18 12' : 'none'}
-              className={isMoving ? 'belt-top-anim' : ''}
-            />
-
-            {/* Ore Bulk on Top Strand */}
-            {showFlowParticles && isMoving && (
-              <>
-                <path
-                  d="M 950,175 Q 750,172 550,173 T 205,175"
-                  fill="none"
-                  stroke="url(#oreGrad)"
-                  strokeWidth="7"
-                  strokeDasharray="14 8"
-                  opacity="0.9"
-                  className="belt-top-anim"
-                />
-                {/* Moving material flow dots representing continuous ore transit */}
-                <g opacity="0.9">
-                  {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) => (
-                    <circle
-                      key={i}
-                      cx="950"
-                      cy={174 + (i % 2 === 0 ? -1.5 : 1)}
-                      r={2.5 + (i % 3) * 0.7}
-                      fill="#f59e0b"
-                      style={{
-                        animation: `oreParticleMove ${animationDurationSec * 1.8}s linear infinite`,
-                        animationDelay: `${-i * (animationDurationSec * 0.15)}s`,
-                      }}
-                    />
-                  ))}
-                </g>
-              </>
-            )}
-
-            {/* RETURN STRAND with Dynamic Sag / Looseness (Moving Rightward) */}
-            {/* The sag curve is dynamically influenced by sensorData.looseness! */}
-            <path
-              d={`M 270,305 Q 400,${305 + sensorData.looseness * 45} 520,305 Q 680,${305 + sensorData.looseness * 45} 960,270`}
-              stroke="#0f172a"
-              strokeWidth="10"
-              fill="none"
-            />
-            <path
-              d={`M 270,305 Q 400,${305 + sensorData.looseness * 45} 520,305 Q 680,${305 + sensorData.looseness * 45} 960,270`}
-              stroke={getColor(tensionerSeverity)}
-              strokeWidth="3"
-              strokeDasharray={isMoving ? '18 12' : 'none'}
-              fill="none"
-              className={isMoving ? 'belt-bottom-anim' : ''}
-            />
-
-            {/* 7. VULCANIZED JOINT #1 (On Upper Strand ~500px) */}
-            <g
-              id="twin-comp-joint-1"
-              className="cursor-pointer transition-transform hover:scale-110"
-              onClick={() => handleComponentClick('joint_1')}
-            >
-              {recentlyChanged['joint_1'] && (
-                <rect
-                  x="462"
-                  y="162"
-                  width="51"
-                  height="36"
-                  rx="6"
-                  fill="none"
-                  stroke={getColor(joint1Severity)}
-                  strokeWidth="3.5"
-                  className="status-change-halo"
-                />
-              )}
-              {/* Splice band overlay */}
-              <rect
-                x="470"
-                y="170"
-                width="35"
-                height="20"
-                rx="3"
-                fill="#1e293b"
-                stroke={getColor(joint1Severity)}
-                strokeWidth="3"
-                className={joint1Severity === 'critical' ? 'crit-pulse' : ''}
-              />
-              <line x1="480" y1="172" x2="480" y2="188" stroke={getColor(joint1Severity)} strokeWidth="2" strokeDasharray="2 2" />
-              <line x1="495" y1="172" x2="495" y2="188" stroke={getColor(joint1Severity)} strokeWidth="2" strokeDasharray="2 2" />
-
-              {/* Joint Tag */}
-              <g transform="translate(487, 135)">
-                <rect x="-35" y="-12" width="70" height="20" rx="4" fill="#0f172a" stroke={getColor(joint1Severity)} strokeWidth="1.5" />
-                <text x="0" y="2" fill="#f8fafc" fontSize="10" fontWeight="bold" textAnchor="middle">
-                  Joint Splice #1
-                </text>
-                <line x1="0" y1="8" x2="0" y2="35" stroke={getColor(joint1Severity)} strokeWidth="1.5" strokeDasharray="2 2" />
-              </g>
-            </g>
-
-            {/* 8. VULCANIZED JOINT #2 (The Critical Monitored Joint ~760px) */}
-            <g
-              id="twin-comp-joint-2"
-              className="cursor-pointer transition-transform hover:scale-110"
-              onClick={() => handleComponentClick('joint_2')}
-            >
-              {recentlyChanged['joint_2'] && (
-                <rect
-                  x="726"
-                  y="158"
-                  width="64"
-                  height="44"
-                  rx="6"
-                  fill="none"
-                  stroke="#ef4444"
-                  strokeWidth="3.5"
-                  className="status-change-halo"
-                />
-              )}
-              {/* Splice band */}
-              <rect
-                x="735"
-                y="168"
-                width="45"
-                height="24"
-                rx="4"
-                fill="#1e293b"
-                stroke={getColor(joint2Severity)}
-                strokeWidth="3.5"
-                className={joint2Severity === 'critical' ? 'crit-pulse' : ''}
-              />
-              <line x1="748" y1="170" x2="748" y2="190" stroke={getColor(joint2Severity)} strokeWidth="2" />
-              <line x1="765" y1="170" x2="765" y2="190" stroke={getColor(joint2Severity)} strokeWidth="2" />
-
-              {/* Callout box */}
-              <g transform="translate(757, 125)">
-                <rect
-                  x="-55"
-                  y="-14"
-                  width="110"
-                  height="26"
-                  rx="4"
-                  fill="#0f172a"
-                  stroke={getColor(joint2Severity)}
-                  strokeWidth="2"
-                  className={joint2Severity === 'critical' ? 'crit-pulse' : ''}
-                />
-                <text x="0" y="0" fill="#f8fafc" fontSize="10" fontWeight="bold" textAnchor="middle">
-                  Joint Splice #2 (CRITICAL)
-                </text>
-                <text x="0" y="9" fill={getColor(joint2Severity)} fontSize="8" fontMono="true" textAnchor="middle">
-                  Risk: {prediction.final_score}/100 ({prediction.status})
-                </text>
-                <line x1="0" y1="12" x2="0" y2="43" stroke={getColor(joint2Severity)} strokeWidth="2" strokeDasharray="2 2" />
-              </g>
-            </g>
-
-            {/* 9. CAMERA VISION SENSOR INSPECTION TOWER */}
-            <g
-              className="cursor-pointer"
-              onClick={() => handleComponentClick('joint_2')}
-            >
-              <rect x="740" y="210" width="36" height="40" rx="4" fill="#0f172a" stroke="#f59e0b" strokeWidth="2" />
-              <circle cx="758" cy="230" r="10" fill="#1e293b" stroke="#f59e0b" strokeWidth="2" />
-              <circle cx="758" cy="230" r="4" fill="#ef4444" className="animate-pulse" />
-              <text x="758" y="265" fill="#f59e0b" fontSize="9" fontWeight="bold" textAnchor="middle">
-                Edge AI Cam #1
-              </text>
-              {/* Light beam to belt */}
-              <polygon points="750,210 766,210 775,192 740,192" fill="#f59e0b" opacity="0.15" />
-            </g>
-
-            {/* 10. GRAVITY TAKE-UP TENSIONING TOWER (Center-Bottom) */}
-            <g
-              id="twin-comp-tensioner"
-              className="cursor-pointer transition-transform hover:scale-105"
-              onClick={() => handleComponentClick('tensioner')}
-            >
-              {recentlyChanged['tensioner'] && (
-                <rect
-                  x="414"
-                  y={338 + sensorData.looseness * 40}
-                  width="72"
-                  height="46"
-                  rx="6"
-                  fill="none"
-                  stroke="#f59e0b"
-                  strokeWidth="3.5"
-                  className="status-change-halo"
-                />
-              )}
-              {/* Vertical Guide Tower Rails */}
-              <line x1="430" y1="305" x2="430" y2="430" stroke="#475569" strokeWidth="3" />
-              <line x1="470" y1="305" x2="470" y2="430" stroke="#475569" strokeWidth="3" />
-              <line x1="430" y1="430" x2="470" y2="430" stroke="#475569" strokeWidth="4" />
-
-              {/* Gravity Counterweight Block (Position dynamically shifts based on looseness!) */}
-              <rect
-                x="422"
-                y={345 + sensorData.looseness * 40}
-                width="56"
-                height="32"
-                rx="3"
-                fill="#1e293b"
-                stroke={getColor(tensionerSeverity)}
-                strokeWidth="2.5"
-              />
-              <text
-                x="450"
-                y={362 + sensorData.looseness * 40}
-                fill="#f8fafc"
-                fontSize="9"
-                fontWeight="bold"
-                textAnchor="middle"
-              >
-                18T Take-Up
-              </text>
-              <text
-                x="450"
-                y={372 + sensorData.looseness * 40}
-                fill={getColor(tensionerSeverity)}
-                fontSize="8"
-                textAnchor="middle"
-              >
-                Sag: {sensorData.looseness.toFixed(2)}
-              </text>
-            </g>
-
-            {/* Live Operational Vector Arrows */}
-            <g opacity="0.6">
-              <text x="600" y="160" fill="#94a3b8" fontSize="11" fontWeight="bold" textAnchor="middle">
-                ← Material Transport Flow (6,500 tph)
-              </text>
-              <text x="600" y="340" fill="#64748b" fontSize="10" textAnchor="middle">
-                Return Strand (Clean Rubber Underside) →
-              </text>
-            </g>
-          </svg>
-        </div>
+        {/* 3D WebGL Canvas via React Three Fiber */}
+        <Conveyor3DScene
+          sensorData={sensorData}
+          prediction={prediction}
+          motorSeverity={motorSeverity}
+          drivePulleySeverity={drivePulleySeverity}
+          joint1Severity={joint1Severity}
+          joint2Severity={joint2Severity}
+          tensionerSeverity={tensionerSeverity}
+          recentlyChanged={recentlyChanged}
+          showFlowParticles={showFlowParticles}
+          onSelectComponent={handleComponentClick}
+          activeHighlight={activeHighlight}
+          cameraDefectType={detection.defectType}
+          cameraDefectConfidence={detection.confidence}
+          cameraSnapshotUrl={detection.snapshotUrl}
+        />
 
         {/* Digital Twin Interactive Guide Footer */}
         <div className="mt-4 pt-3 border-t border-[var(--border-subtle)] flex flex-col sm:flex-row items-center justify-between text-[12px] text-[var(--text-tertiary)] gap-3">
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 text-[var(--accent-primary)] shrink-0" />
             <span>
-              Select any mechanical component (<strong>Motor M-01</strong>, <strong>Head Pulley</strong>, <strong>Splice #2</strong>, or <strong>Tensioner Tower</strong>) to inspect engineering telemetry.
+              Select any mechanical component (<strong>Motor M-01</strong>, <strong>Head Pulley</strong>, <strong>Splice #1</strong>, <strong>Splice #2</strong>, or <strong>Tensioner Tower</strong>) to inspect engineering telemetry.
             </span>
           </div>
           <div className="font-mono text-[var(--text-secondary)] shrink-0">
@@ -902,21 +434,21 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
         </div>
       </div>
 
-      {/* 3. Component Status Cards Matrix (4-column grid, 16px gap) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* 3. Component Status Cards Matrix (5-column grid, 14px gap) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
         {/* Motor M-01 */}
         <div
           onClick={() => handleComponentClick('motor')}
           className="industrial-card cursor-pointer transition-all space-y-2.5"
         >
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-[14px] text-[var(--text-primary)]">Drive Motor M-01</span>
+            <span className="font-semibold text-[13px] text-[var(--text-primary)]">Drive Motor M-01</span>
             {getStatusBadge(motorSeverity)}
           </div>
-          <div className="text-[18px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
+          <div className="text-[17px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
             {sensorData.temperature.toFixed(1)} °C | {sensorData.motor_current.toFixed(0)} A
           </div>
-          <div className="text-[12px] text-[var(--text-tertiary)] leading-[1.5]">
+          <div className="text-[11px] text-[var(--text-tertiary)] leading-[1.5]">
             450 kW induction drive; stator thermal sensing.
           </div>
         </div>
@@ -927,14 +459,45 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
           className="industrial-card cursor-pointer transition-all space-y-2.5"
         >
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-[14px] text-[var(--text-primary)]">Head Drive Pulley</span>
+            <span className="font-semibold text-[13px] text-[var(--text-primary)]">Head Drive Pulley</span>
             {getStatusBadge(drivePulleySeverity)}
           </div>
-          <div className="text-[18px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
+          <div className="text-[17px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
             {sensorData.bearing_condition.toFixed(0)} pts | {sensorData.vibration.toFixed(2)} mm/s
           </div>
-          <div className="text-[12px] text-[var(--text-tertiary)] leading-[1.5]">
+          <div className="text-[11px] text-[var(--text-tertiary)] leading-[1.5]">
             Acoustic shock pulse &amp; ceramic lagging friction.
+          </div>
+        </div>
+
+        {/* Joint #1 (Optical Cam #1 Monitored) */}
+        <div
+          onClick={() => handleComponentClick('joint_1')}
+          className={`industrial-card cursor-pointer transition-all space-y-2.5 ${
+            detection.defectType === 'Material Spillage'
+              ? 'border-orange-500/70 ring-1 ring-orange-500/30 bg-orange-950/20'
+              : detection.defectType === 'Crack/Tear'
+              ? 'border-red-500/70 ring-1 ring-red-500/30 bg-red-950/20'
+              : joint1Severity === 'warning'
+              ? 'border-amber-500/50 ring-1 ring-amber-500/20'
+              : ''
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-[13px] text-[var(--text-primary)]">Joint #1 (Cam 1)</span>
+            {getStatusBadge(joint1Severity)}
+          </div>
+          <div className="text-[17px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
+            {detection.defectType !== 'Normal' ? (
+              <span className={detection.defectType === 'Material Spillage' ? 'text-orange-400' : 'text-red-400'}>
+                {detection.defectType === 'Material Spillage' ? 'Spillage' : detection.defectType} ({detection.confidence}%)
+              </span>
+            ) : (
+              <span>Anomaly: {detection.anomalyScore.toFixed(0)}/100</span>
+            )}
+          </div>
+          <div className="text-[11px] text-[var(--text-tertiary)] leading-[1.5]">
+            {detection.defectType !== 'Normal' ? 'Optical line scan detected anomaly.' : 'Transfer chute optical station.'}
           </div>
         </div>
 
@@ -950,13 +513,13 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-[14px] text-[var(--text-primary)]">Joint Splice #2</span>
+            <span className="font-semibold text-[13px] text-[var(--text-primary)]">Joint Splice #2</span>
             {getStatusBadge(joint2Severity)}
           </div>
-          <div className="text-[18px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
-            RUL: {prediction.rul_hours} hrs | Risk: {prediction.final_score}
+          <div className="text-[17px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
+            RUL: {prediction.rul_hours} hrs
           </div>
-          <div className="text-[12px] text-[var(--text-tertiary)] leading-[1.5]">
+          <div className="text-[11px] text-[var(--text-tertiary)] leading-[1.5]">
             Steel cord vulcanized splice under camera AI.
           </div>
         </div>
@@ -967,13 +530,13 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
           className="industrial-card cursor-pointer transition-all space-y-2.5"
         >
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-[14px] text-[var(--text-primary)]">Take-Up Tower</span>
+            <span className="font-semibold text-[13px] text-[var(--text-primary)]">Take-Up Tower</span>
             {getStatusBadge(tensionerSeverity)}
           </div>
-          <div className="text-[18px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
-            Sag Index: {sensorData.looseness.toFixed(2)}
+          <div className="text-[17px] font-bold font-mono tabular-nums text-[var(--text-primary)]">
+            Sag: {sensorData.looseness.toFixed(2)}
           </div>
-          <div className="text-[12px] text-[var(--text-tertiary)] leading-[1.5]">
+          <div className="text-[11px] text-[var(--text-tertiary)] leading-[1.5]">
             18T counterweight gravity tensioner carriage.
           </div>
         </div>
