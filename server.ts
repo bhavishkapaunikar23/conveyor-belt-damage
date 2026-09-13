@@ -53,50 +53,86 @@ function getStatusFromScore(score: number): 'Healthy' | 'Warning' | 'Critical' {
   return 'Healthy';
 }
 
-function getContributingFactorsList(data: Record<string, number>) {
-  const factors: { name: string; factor_key: string; impact_percent: number; current_value: number; threshold_exceeded: string; severity: string }[] = [];
+function getContributingFactorsList(data: Record<string, number>, camera?: { camera_risk_score?: number; defect_type?: string; confidence?: number }) {
   const rawList: { name: string; key: string; pts: number; current: number; thresh: string; severity: string }[] = [];
+  const cameraRisk = Number(camera?.camera_risk_score || 0);
 
-  if (data.temperature > 80) rawList.push({ name: 'High Temperature', key: 'temperature', pts: 20, current: data.temperature, thresh: '>80°C', severity: 'critical' });
-  else if (data.temperature > 60) rawList.push({ name: 'Elevated Temperature', key: 'temperature', pts: 10, current: data.temperature, thresh: '>60°C', severity: 'warning' });
-
-  if (data.vibration > 5) rawList.push({ name: 'Severe Pulley/Joint Vibration', key: 'vibration', pts: 20, current: data.vibration, thresh: '>5 mm/s', severity: 'critical' });
-  else if (data.vibration > 2) rawList.push({ name: 'Splice Chatter Vibration', key: 'vibration', pts: 10, current: data.vibration, thresh: '>2 mm/s', severity: 'warning' });
-
-  if (data.overload > 100) rawList.push({ name: 'Severe Conveyor Overload', key: 'overload', pts: 15, current: data.overload, thresh: '>100%', severity: 'critical' });
-  else if (data.overload > 90) rawList.push({ name: 'Tonnage Strain', key: 'overload', pts: 8, current: data.overload, thresh: '>90%', severity: 'warning' });
-
-  if (data.bearing_condition < 40) rawList.push({ name: 'Critical Bearing Degradation', key: 'bearing_condition', pts: 20, current: data.bearing_condition, thresh: '<40 pts', severity: 'critical' });
-  else if (data.bearing_condition < 60) rawList.push({ name: 'Bearing Race Wear', key: 'bearing_condition', pts: 10, current: data.bearing_condition, thresh: '<60 pts', severity: 'warning' });
-
-  if (data.looseness > 0.7) rawList.push({ name: 'Excessive Belt Sag / Looseness', key: 'looseness', pts: 10, current: data.looseness, thresh: '>0.70', severity: 'critical' });
-  else if (data.looseness > 0.5) rawList.push({ name: 'Tension Slack Indication', key: 'looseness', pts: 5, current: data.looseness, thresh: '>0.50', severity: 'warning' });
-
-  if (data.motion_change > 5) rawList.push({ name: 'Frequent Start-Stop Cycling', key: 'motion_change', pts: 10, current: data.motion_change, thresh: '>5/hr', severity: 'critical' });
-  else if (data.motion_change > 3) rawList.push({ name: 'Cyclic Motion Fatigue', key: 'motion_change', pts: 5, current: data.motion_change, thresh: '>3/hr', severity: 'warning' });
-
-  if (data.acceleration > 3) rawList.push({ name: 'Ore Chute Impact Jerk', key: 'acceleration', pts: 5, current: data.acceleration, thresh: '>3 m/s²', severity: 'critical' });
-
-  const total = rawList.reduce((acc, cur) => acc + cur.pts, 0);
-  if (total === 0) {
-    return [{
-      name: 'Normal Operating Baseline',
-      factor_key: 'system',
-      impact_percent: 100,
-      current_value: 0,
-      threshold_exceeded: 'Nominal',
-      severity: 'healthy',
-    }];
+  if (cameraRisk > 15 && camera) {
+    const defectLabel = camera.defect_type && camera.defect_type !== 'No Defect / Clean Surface' ? camera.defect_type : 'Optical Surface Anomaly';
+    rawList.push({
+      name: `Visual Line-Scan: ${defectLabel}`,
+      key: 'camera_visual',
+      pts: Math.round(cameraRisk * 0.4 * 2.5),
+      current: cameraRisk,
+      thresh: `${camera.confidence || 90}% confidence`,
+      severity: cameraRisk >= 60 ? 'critical' : 'warning',
+    });
   }
 
-  return rawList.map(item => ({
-    name: item.name,
-    factor_key: item.key,
-    impact_percent: Math.round((item.pts / total) * 100),
-    current_value: item.current,
-    threshold_exceeded: item.thresh,
-    severity: item.severity,
-  })).sort((a, b) => b.impact_percent - a.impact_percent);
+  if (data.temperature > 80) rawList.push({ name: 'Joint Splice Thermal Excursion', key: 'temperature', pts: 22, current: data.temperature, thresh: '>80°C', severity: 'critical' });
+  else if (data.temperature > 60) rawList.push({ name: 'Elevated Splice Temperature', key: 'temperature', pts: 12, current: data.temperature, thresh: '>60°C', severity: 'warning' });
+
+  if (data.vibration > 5) rawList.push({ name: 'Severe Pulley/Joint Vibration', key: 'vibration', pts: 24, current: data.vibration, thresh: '>5 mm/s', severity: 'critical' });
+  else if (data.vibration > 2) rawList.push({ name: 'Splice Chatter Harmonic Vibration', key: 'vibration', pts: 12, current: data.vibration, thresh: '>2 mm/s', severity: 'warning' });
+
+  if (data.overload > 100) rawList.push({ name: 'Tonnage Conveyor Overload', key: 'overload', pts: 18, current: data.overload, thresh: '>100%', severity: 'critical' });
+  else if (data.overload > 90) rawList.push({ name: 'Ore Chute Tonnage Strain', key: 'overload', pts: 10, current: data.overload, thresh: '>90%', severity: 'warning' });
+
+  if (data.bearing_condition < 40) rawList.push({ name: 'Critical Bearing Degradation', key: 'bearing_condition', pts: 22, current: data.bearing_condition, thresh: '<40 pts', severity: 'critical' });
+  else if (data.bearing_condition < 60) rawList.push({ name: 'Bearing Acoustic Shock Wear', key: 'bearing_condition', pts: 12, current: data.bearing_condition, thresh: '<60 pts', severity: 'warning' });
+
+  if (data.looseness > 0.7) rawList.push({ name: 'Excessive Belt Sag / Slack Tension', key: 'looseness', pts: 14, current: data.looseness, thresh: '>0.70', severity: 'critical' });
+  else if (data.looseness > 0.5) rawList.push({ name: 'Take-Up Tension Slack', key: 'looseness', pts: 7, current: data.looseness, thresh: '>0.50', severity: 'warning' });
+
+  if (data.motion_change > 5) rawList.push({ name: 'Frequent Cyclic Start-Stop Fatigue', key: 'motion_change', pts: 12, current: data.motion_change, thresh: '>5/hr', severity: 'critical' });
+  else if (data.motion_change > 3) rawList.push({ name: 'Dynamic Motion Transients', key: 'motion_change', pts: 6, current: data.motion_change, thresh: '>3/hr', severity: 'warning' });
+
+  if (data.acceleration > 3) rawList.push({ name: 'Ore Chute Kinetic Impact Jerk', key: 'acceleration', pts: 10, current: data.acceleration, thresh: '>3 m/s²', severity: 'critical' });
+
+  if (rawList.length > 0) {
+    if (rawList.length === 1) {
+      rawList.push({
+        name: 'Drive Pulley Dynamic Load',
+        key: 'motor_current',
+        pts: 8,
+        current: data.motor_current || 178,
+        thresh: `${(data.motor_current || 178).toFixed(0)} A (Nominal)`,
+        severity: 'healthy',
+      });
+      rawList.push({
+        name: 'Haulage Velocity Sync',
+        key: 'belt_speed',
+        pts: 6,
+        current: data.belt_speed || 4.2,
+        thresh: `${(data.belt_speed || 4.2).toFixed(2)} m/s (Nominal)`,
+        severity: 'healthy',
+      });
+    }
+
+    const total = rawList.reduce((acc, cur) => acc + cur.pts, 0);
+    const sorted = [...rawList].sort((a, b) => b.pts - a.pts);
+    let remaining = 100;
+    return sorted.map((item, idx) => {
+      const isLast = idx === sorted.length - 1;
+      const pct = isLast ? Math.max(1, remaining) : Math.max(1, Math.round((item.pts / total) * 100));
+      remaining = Math.max(0, remaining - pct);
+      return {
+        name: item.name,
+        factor_key: item.key,
+        impact_percent: pct,
+        current_value: item.current,
+        threshold_exceeded: item.thresh,
+        severity: item.severity,
+      };
+    });
+  }
+
+  return [
+    { name: 'Belt Carcass & Splice Integrity', factor_key: 'splice_integrity', impact_percent: 25, current_value: 98, threshold_exceeded: 'Nominal (Zero Delamination)', severity: 'healthy' },
+    { name: 'Drive Pulley & Bearing Mechanics', factor_key: 'bearing_condition', impact_percent: 25, current_value: data.bearing_condition || 88, threshold_exceeded: `${data.bearing_condition || 88} pts (Healthy)`, severity: 'healthy' },
+    { name: 'Tonnage & Speed Synchronization', factor_key: 'belt_speed', impact_percent: 25, current_value: data.belt_speed || 4.2, threshold_exceeded: `${(data.belt_speed || 4.2).toFixed(2)} m/s (Balanced)`, severity: 'healthy' },
+    { name: 'Optical Line-Scan Camera Surface', factor_key: 'camera_visual', impact_percent: 25, current_value: cameraRisk, threshold_exceeded: 'Clean Flange / Nominal Tracking', severity: 'healthy' },
+  ];
 }
 
 // 1. POST /predict and /api/predict
@@ -145,17 +181,7 @@ const handlePredictCombined = (req: Request, res: Response) => {
   else if (finalScore >= 30) rulHours = Math.max(36, Math.round(180 - (finalScore - 30) * 3.5));
   else rulHours = Math.max(350, Math.round(650 - finalScore * 8));
 
-  const contributing = getContributingFactorsList(sensors);
-  if (cameraRiskScore > 15) {
-    contributing.unshift({
-      name: `Visual Inspection: ${camera.defect_type || 'Surface Anomaly'}`,
-      factor_key: 'camera_visual',
-      impact_percent: Math.round((cameraRiskScore * 0.4 / (finalScore || 1)) * 100),
-      current_value: cameraRiskScore,
-      threshold_exceeded: `${camera.confidence || 90}% confidence`,
-      severity: cameraRiskScore >= 60 ? 'critical' : 'warning',
-    });
-  }
+  const contributing = getContributingFactorsList(sensors, camera);
 
   let recommendation = 'Conveyor belt operating within nominal parameters. Continue routine inspection.';
   if (status === 'Critical') {

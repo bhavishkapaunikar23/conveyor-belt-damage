@@ -255,3 +255,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .animate-scanline {
   animation: scanline 4s linear infinite;
 }
+
+@keyframes sim-button-blink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  50% {
+    opacity: 0.7;
+    box-shadow: 0 0 12px 2px currentColor;
+  }
+}
+
+.sim-button--active-blink {
+  animation: sim-button-blink 1.2s ease-in-out infinite;
+  border-width: 2px !important;
+}

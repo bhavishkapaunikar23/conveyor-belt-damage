@@ -127,12 +127,27 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
 
   // Baseline and debouncing
   const baselineEdgeCountsRef = useRef<number[]>([]);
+  const calibrationFramesCountRef = useRef<number>(0);
+  const prevFrameDataRef = useRef<Uint8ClampedArray | null>(null);
   const candidateStatusRef = useRef<{ defectType: DefectCategory; count: number }>({
     defectType: 'Normal',
     count: 0,
   });
   const currentDefectTypeRef = useRef<DefectCategory>('Normal');
   const lastAlertTimestampRef = useRef<number>(0);
+  const manualOverrideUntilRef = useRef<number>(0);
+
+  // Helper to cleanly reset baseline and calibration
+  const resetCalibrationAndState = useCallback(() => {
+    baselineEdgeCountsRef.current = [];
+    calibrationFramesCountRef.current = 0;
+    prevFrameDataRef.current = null;
+    candidateStatusRef.current = { defectType: 'Normal', count: 0 };
+    currentDefectTypeRef.current = 'Normal';
+    manualOverrideUntilRef.current = 0;
+    setLiveAnomalyScore(8);
+    setDetection(DEFAULT_DETECTION);
+  }, []);
 
   // CCTV timestamp clock
   useEffect(() => {
@@ -165,18 +180,14 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
     setFeedMode('recorded');
     setVideoLoadError(false);
 
-    baselineEdgeCountsRef.current = [];
-    candidateStatusRef.current = { defectType: 'Normal', count: 0 };
-    currentDefectTypeRef.current = 'Normal';
-    setLiveAnomalyScore(0);
-    setDetection(DEFAULT_DETECTION);
+    resetCalibrationAndState();
 
     if (videoRef.current) {
       videoRef.current.src = objectUrl;
       videoRef.current.load();
       videoRef.current.play().catch(() => {});
     }
-  }, []);
+  }, [resetCalibrationAndState]);
 
   // Handle Load Sample Video
   const handleLoadSampleVideo = useCallback(() => {
@@ -190,18 +201,14 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
     setFeedMode('recorded');
     setVideoLoadError(false);
 
-    baselineEdgeCountsRef.current = [];
-    candidateStatusRef.current = { defectType: 'Normal', count: 0 };
-    currentDefectTypeRef.current = 'Normal';
-    setLiveAnomalyScore(10);
-    setDetection(DEFAULT_DETECTION);
+    resetCalibrationAndState();
 
     if (videoRef.current) {
       videoRef.current.src = './assets/belt-inspection.mp4';
       videoRef.current.load();
       videoRef.current.play().catch(() => {});
     }
-  }, []);
+  }, [resetCalibrationAndState]);
 
   // Clean up object URLs on unmount
   useEffect(() => {
@@ -217,6 +224,7 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
 
   // Feed mode stream management (Live Webcam vs Recorded)
   useEffect(() => {
+    resetCalibrationAndState();
     if (feedMode === 'live') {
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         navigator.mediaDevices
@@ -250,7 +258,7 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
         }
       }
     }
-  }, [feedMode, videoSourceUrl]);
+  }, [feedMode, videoSourceUrl, resetCalibrationAndState]);
 
   // Combined score calculator & defect alert trigger
   const processDefectChange = useCallback(
@@ -317,6 +325,10 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
   // Manual defect test trigger for simulation
   const triggerManualDefectTest = useCallback(
     (type: DefectCategory) => {
+      // Grant 6 seconds of manual override protection so manual clicks are not immediately undone by background analyzer
+      manualOverrideUntilRef.current = Date.now() + 6000;
+      candidateStatusRef.current = { defectType: type, count: 3 };
+
       let score = 0;
       let conf = 98;
       let label = 'Nominal Belt Surface';
@@ -347,6 +359,8 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
         severity = 'Warning';
       }
 
+      setLiveAnomalyScore(score);
+
       let snapshot: string | undefined;
       if (analysisCanvasRef.current) {
         try {
@@ -373,13 +387,15 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
     [processDefectChange]
   );
 
-  // Continuous Frame Analysis Loop (Runs every 380ms)
+  // Continuous Frame Analysis Loop (Runs every 350ms)
   useEffect(() => {
     if (!isScanning) return;
 
     const interval = setInterval(() => {
       const video = videoRef.current;
-      if (!video || video.readyState < 2 || video.paused) return;
+      // Guard 1: Ignore uninitialized, buffering, or paused states
+      if (!video || video.readyState < 2 || video.paused || video.ended) return;
+      if (video.videoWidth === 0 || video.videoHeight === 0) return;
 
       const canvas = analysisCanvasRef.current;
       if (!canvas) return;
@@ -401,25 +417,61 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
           gray[i] = (data[i * 4] * 77 + data[i * 4 + 1] * 150 + data[i * 4 + 2] * 29) >> 8;
         }
 
-        // Expected belt track region:
-        // Conveyor belt is centered between x: 16%..86%, y: 20%..82%
+        // Conveyor belt region geometry:
+        // Central carrying surface: x: 16%..84%, y: 15%..72%
+        // Bottom spill/discharge area ("material niche gir raha hai"): y >= 72%
+        // Left & right overflow flanges: x <= 16%, x >= 84%
         const beltX1 = Math.round(width * 0.16);
-        const beltX2 = Math.round(width * 0.86);
-        const beltY1 = Math.round(height * 0.20);
-        const beltY2 = Math.round(height * 0.82);
+        const beltX2 = Math.round(width * 0.84);
+        const beltY1 = Math.round(height * 0.15);
+        const beltY2 = Math.round(height * 0.72);
 
+        // Frame-to-frame temporal motion analysis
+        const prevGray = prevFrameDataRef.current;
+        let bottomMotion = 0;
+        let flankMotion = 0;
+        let insideMotion = 0;
+
+        if (prevGray && prevGray.length === gray.length) {
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const idx = y * width + x;
+              const diff = Math.abs(gray[idx] - prevGray[idx]);
+              if (diff > 14) {
+                if (y >= beltY2) {
+                  bottomMotion++;
+                } else if (x <= beltX1 || x >= beltX2) {
+                  flankMotion++;
+                } else if (y >= beltY1) {
+                  insideMotion++;
+                }
+              }
+            }
+          }
+        }
+        prevFrameDataRef.current = new Uint8ClampedArray(gray);
+
+        // Edge detection & Crack Fissure analysis
         let insideEdges = 0;
-        let outsideEdges = 0;
+        let insideStrongEdges = 0;
+        let crackFissureCount = 0;
+
+        let minCrackX = width;
+        let maxCrackX = 0;
+        let minCrackY = height;
+        let maxCrackY = 0;
+
+        let bottomEdges = 0;
         let leftOutEdges = 0;
         let rightOutEdges = 0;
 
-        let minOutX = width;
-        let maxOutX = 0;
-        let minOutY = height;
-        let maxOutY = 0;
+        let minSpillX = width;
+        let maxSpillX = 0;
+        let minSpillY = height;
+        let maxSpillY = 0;
 
-        for (let y = 3; y < height - 3; y++) {
-          for (let x = 3; x < width - 3; x++) {
+        for (let y = 2; y < height - 2; y++) {
+          for (let x = 2; x < width - 2; x++) {
             const idx = y * width + x;
             const gx =
               -gray[idx - width - 1] + gray[idx - width + 1] -
@@ -430,40 +482,61 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
               gray[idx + width - 1] + 2 * gray[idx + width] + gray[idx + width + 1];
             const mag = Math.abs(gx) + Math.abs(gy);
 
-            if (mag > 45) {
-              const isInside = x >= beltX1 && x <= beltX2 && y >= beltY1 && y <= beltY2;
-              if (isInside) {
+            // Spatial assignment
+            const isBottomSpill = y >= beltY2;
+            const isLeftSpill = x <= beltX1 && y >= beltY1;
+            const isRightSpill = x >= beltX2 && y >= beltY1;
+            const isInsideBelt = x > beltX1 && x < beltX2 && y >= beltY1 && y < beltY2;
+
+            if (mag > 28) {
+              if (isBottomSpill) {
+                bottomEdges++;
+                if (x < minSpillX) minSpillX = x;
+                if (x > maxSpillX) maxSpillX = x;
+                if (y < minSpillY) minSpillY = y;
+                if (y > maxSpillY) maxSpillY = y;
+              } else if (isLeftSpill) {
+                leftOutEdges++;
+                if (x < minSpillX) minSpillX = x;
+                if (x > maxSpillX) maxSpillX = x;
+                if (y < minSpillY) minSpillY = y;
+                if (y > maxSpillY) maxSpillY = y;
+              } else if (isRightSpill) {
+                rightOutEdges++;
+                if (x < minSpillX) minSpillX = x;
+                if (x > maxSpillX) maxSpillX = x;
+                if (y < minSpillY) minSpillY = y;
+                if (y > maxSpillY) maxSpillY = y;
+              } else if (isInsideBelt) {
                 insideEdges++;
-              } else {
-                outsideEdges++;
-                if (x < beltX1) leftOutEdges++;
-                if (x > beltX2) rightOutEdges++;
-                if (x < minOutX) minOutX = x;
-                if (x > maxOutX) maxOutX = x;
-                if (y < minOutY) minOutY = y;
-                if (y > maxOutY) maxOutY = y;
+                if (mag > 42) insideStrongEdges++;
+
+                // Fissure detection: dark valley / crack boundary on rubber
+                const centerVal = gray[idx];
+                const isHorizValley =
+                  gray[idx - 2] - centerVal > 11 && gray[idx + 2] - centerVal > 11;
+                const isVertValley =
+                  gray[idx - 2 * width] - centerVal > 11 && gray[idx + 2 * width] - centerVal > 11;
+                const isDirectionalTear = Math.abs(gx) > 28 || Math.abs(gy) > 28;
+
+                if (isHorizValley || isVertValley || (mag > 42 && isDirectionalTear)) {
+                  crackFissureCount++;
+                  if (x < minCrackX) minCrackX = x;
+                  if (x > maxCrackX) maxCrackX = x;
+                  if (y < minCrackY) minCrackY = y;
+                  if (y > maxCrackY) maxCrackY = y;
+                }
               }
             }
           }
         }
 
-        // Rolling baseline of outside edge activity (to detect when outside edges spike)
-        const baselineBuf = baselineEdgeCountsRef.current;
-        let baselineAvg = outsideEdges;
-        if (baselineBuf.length > 0) {
-          baselineAvg = baselineBuf.reduce((a, b) => a + b, 0) / baselineBuf.length;
-        } else {
-          baselineBuf.push(outsideEdges);
-        }
+        // Fast calibration: only requires 2 frames (~700ms) to settle
+        calibrationFramesCountRef.current += 1;
+        const isCalibrating = calibrationFramesCountRef.current < 2;
 
-        if (outsideEdges < 30 || baselineBuf.length < 5) {
-          baselineBuf.push(outsideEdges);
-          if (baselineBuf.length > 20) baselineBuf.shift();
-        }
-
-        // Defect Classification Logic:
         let defectType: DefectCategory = 'Normal';
-        let anomalyScore = 12;
+        let anomalyScore = 8;
         let confidence = 98;
         let defectLabel = 'Nominal Belt Surface — Clean Tracking';
         let bbox: CameraDefectInfo['bbox'];
@@ -471,76 +544,114 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
         let severity: CameraDefectInfo['severity'] = 'Healthy';
         let cameraScore = 0;
 
-        // 1. MATERIAL SPILLAGE DETECTION:
-        // Spillage is characterized by significant edge/texture density appearing OUTSIDE
-        // the expected belt region (ore pellets spilling over the side flange/skirtboard).
-        // On the provided sample video, outsideEdges jumps to ~260 along x=3%..12%, y=30%..62% between 3.9s and 7.1s.
-        if (outsideEdges > 35 || (outsideEdges > 25 && (leftOutEdges > 20 || rightOutEdges > 20))) {
-          defectType = 'Material Spillage';
-          status = 'Spillage Detected';
-          severity = 'Warning';
-          cameraScore = 82;
-          anomalyScore = Math.min(96, Math.round(74 + Math.min(22, (outsideEdges / 250) * 20)));
-          confidence = anomalyScore;
-          const isLeft = leftOutEdges >= rightOutEdges;
-          defectLabel = isLeft
-            ? 'Material Spillage: Left Flange Overflow'
-            : 'Material Spillage: Right Skirt Overflow';
+        if (!isCalibrating) {
+          const totalSpillEdges = bottomEdges + leftOutEdges + rightOutEdges;
+          const totalSpillMotion = bottomMotion + flankMotion;
 
-          const bx = Math.max(2, Math.min(80, Math.round((minOutX / width) * 100)));
-          const by = Math.max(5, Math.min(75, Math.round((minOutY / height) * 100)));
-          const bw = Math.max(14, Math.min(45, Math.round(((maxOutX - minOutX) / width) * 100) + 6));
-          const bh = Math.max(18, Math.min(55, Math.round(((maxOutY - minOutY) / height) * 100) + 6));
+          // 1. MATERIAL SPILLAGE (Material falling down underneath / spilling over skirtboards)
+          const isFallingDown =
+            bottomEdges >= 18 ||
+            bottomMotion >= 22 ||
+            (bottomEdges >= 10 && bottomMotion >= 10);
+          const isFlangeOverflow =
+            leftOutEdges >= 22 ||
+            rightOutEdges >= 22 ||
+            (leftOutEdges >= 12 && flankMotion >= 12) ||
+            (rightOutEdges >= 12 && flankMotion >= 12);
+          const isGeneralSpillage = totalSpillEdges >= 36 || totalSpillMotion >= 45;
 
-          bbox = {
-            x: bx,
-            y: by,
-            width: bw,
-            height: bh,
-            label: `${defectLabel} (${confidence}%)`,
-          };
-        }
-        // 2. CRACK / TEAR DETECTION:
-        // Sharp irregular dark lines appearing INSIDE the belt region
-        else if (insideEdges > 65) {
-          defectType = 'Crack/Tear';
-          status = 'Crack Detected';
-          severity = 'Critical';
-          cameraScore = 90;
-          anomalyScore = Math.min(96, Math.round(76 + (insideEdges / 200) * 20));
-          confidence = anomalyScore;
-          defectLabel = 'Crack/Tear: Longitudinal Separation';
-          bbox = {
-            x: 28,
-            y: 35,
-            width: 44,
-            height: 38,
-            label: `Crack/Tear Detected (${confidence}%)`,
-          };
-        }
-        // 3. TRACKING MISALIGNMENT / EDGE WEAR:
-        // Persistent asymmetry between left and right side activity
-        else if (Math.abs(leftOutEdges - rightOutEdges) > 22) {
-          defectType = 'Misalignment/Edge Wear';
-          status = 'Minor Wear';
-          severity = 'Warning';
-          cameraScore = 45;
-          anomalyScore = 52;
-          confidence = 78;
-          defectLabel = 'Tracking Misalignment / Edge Wear';
-          bbox = {
-            x: leftOutEdges > rightOutEdges ? 8 : 72,
-            y: 20,
-            width: 20,
-            height: 50,
-            label: `Tracking Misalignment (${confidence}%)`,
-          };
+          if (isFallingDown || isFlangeOverflow || isGeneralSpillage) {
+            defectType = 'Material Spillage';
+            status = 'Spillage Detected';
+            severity = 'Warning';
+            cameraScore = 84;
+            anomalyScore = Math.min(96, Math.max(78, Math.round(74 + (totalSpillEdges + totalSpillMotion) * 0.25)));
+            confidence = anomalyScore;
+
+            if (isFallingDown || bottomEdges > Math.max(leftOutEdges, rightOutEdges)) {
+              defectLabel = 'Material Spillage: Chute Discharge Fall / Overflow';
+              const bx = Math.max(4, Math.min(75, Math.round((minSpillX / width) * 100)));
+              const by = Math.max(60, Math.min(80, Math.round((minSpillY / height) * 100)));
+              const bw = Math.max(25, Math.min(70, Math.round(((maxSpillX - minSpillX) / width) * 100) + 8));
+              const bh = Math.max(16, Math.min(35, Math.round(((maxSpillY - minSpillY) / height) * 100) + 8));
+              bbox = { x: bx, y: by, width: bw, height: bh, label: `${defectLabel} (${confidence}%)` };
+            } else if (leftOutEdges >= rightOutEdges) {
+              defectLabel = 'Material Spillage: Left Flange Overflow';
+              const bx = Math.max(2, Math.min(25, Math.round((minSpillX / width) * 100)));
+              const by = Math.max(20, Math.min(70, Math.round((minSpillY / height) * 100)));
+              const bw = Math.max(16, Math.min(30, Math.round(((maxSpillX - minSpillX) / width) * 100) + 6));
+              const bh = Math.max(20, Math.min(50, Math.round(((maxSpillY - minSpillY) / height) * 100) + 6));
+              bbox = { x: bx, y: by, width: bw, height: bh, label: `${defectLabel} (${confidence}%)` };
+            } else {
+              defectLabel = 'Material Spillage: Right Skirt Overflow';
+              const bx = Math.max(70, Math.min(85, Math.round((minSpillX / width) * 100)));
+              const by = Math.max(20, Math.min(70, Math.round((minSpillY / height) * 100)));
+              const bw = Math.max(16, Math.min(30, Math.round(((maxSpillX - minSpillX) / width) * 100) + 6));
+              const bh = Math.max(20, Math.min(50, Math.round(((maxSpillY - minSpillY) / height) * 100) + 6));
+              bbox = { x: bx, y: by, width: bw, height: bh, label: `${defectLabel} (${confidence}%)` };
+            }
+          }
+          // 2. CRACK / TEAR DETECTION (Rupture, tear, slit, splice parting inside belt body)
+          else if (
+            insideStrongEdges >= 22 ||
+            crackFissureCount >= 12 ||
+            (insideEdges >= 30 && crackFissureCount >= 6) ||
+            insideEdges >= 42
+          ) {
+            defectType = 'Crack/Tear';
+            status = 'Crack Detected';
+            severity = 'Critical';
+            cameraScore = 90;
+            anomalyScore = Math.min(98, Math.max(82, Math.round(80 + (crackFissureCount + insideStrongEdges) * 0.35)));
+            confidence = anomalyScore;
+            defectLabel = 'Crack/Tear: Surface Separation';
+
+            const bx = Math.max(16, Math.min(70, Math.round((minCrackX / width) * 100) - 2));
+            const by = Math.max(18, Math.min(65, Math.round((minCrackY / height) * 100) - 2));
+            const bw = Math.max(20, Math.min(55, Math.round(((maxCrackX - minCrackX) / width) * 100) + 6));
+            const bh = Math.max(18, Math.min(45, Math.round(((maxCrackY - minCrackY) / height) * 100) + 6));
+
+            bbox = {
+              x: bx,
+              y: by,
+              width: bw,
+              height: bh,
+              label: `${defectLabel} (${confidence}%)`,
+            };
+          }
+          // 3. TRACKING MISALIGNMENT / EDGE WEAR
+          else if (
+            Math.abs(leftOutEdges - rightOutEdges) >= 24 &&
+            (leftOutEdges >= 18 || rightOutEdges >= 18)
+          ) {
+            defectType = 'Misalignment/Edge Wear';
+            status = 'Minor Wear';
+            severity = 'Warning';
+            cameraScore = 50;
+            anomalyScore = 52;
+            confidence = 78;
+            defectLabel = 'Tracking Misalignment / Edge Wear';
+            bbox = {
+              x: leftOutEdges > rightOutEdges ? 8 : 72,
+              y: 20,
+              width: 20,
+              height: 50,
+              label: `Tracking Misalignment (${confidence}%)`,
+            };
+          }
         }
 
+        // Live anomaly score follows real detected level or rests at baseline
         setLiveAnomalyScore(anomalyScore);
 
-        // Debounce: sustain for at least 2 consecutive analysis cycles (~760ms)
-        // This reliably catches 2-3s real defect segments while filtering single-frame noise
+        // Check if a manual button override is active
+        const nowMs = Date.now();
+        const isManualOverrideActive = nowMs < manualOverrideUntilRef.current;
+        if (isManualOverrideActive) {
+          return;
+        }
+
+        // Debounce: require 2 consecutive analysis cycles (~700ms) to lock in state change
         if (candidateStatusRef.current.defectType === defectType) {
           candidateStatusRef.current.count += 1;
         } else {
@@ -578,7 +689,7 @@ export const CameraFeedProvider: React.FC<CameraFeedProviderProps> = ({
       } catch (e) {
         // Silent catch for canvas reading edge cases
       }
-    }, 380);
+    }, 350);
 
     return () => clearInterval(interval);
   }, [isScanning, processDefectChange]);

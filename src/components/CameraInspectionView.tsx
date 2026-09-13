@@ -453,41 +453,74 @@ export const CameraInspectionView: React.FC<CameraInspectionViewProps> = ({
               </span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              <button
-                id="btn-simulate-spillage"
-                onClick={() => triggerManualDefectTest('Material Spillage')}
-                className="p-2.5 rounded-[6px] bg-orange-950/40 hover:bg-orange-900/50 border border-orange-500/40 text-left transition-colors"
-              >
-                <div className="text-[12px] font-semibold text-orange-400">🟠 Material Spillage</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Score: 84 | Conf: 84%</div>
-              </button>
-
-              <button
-                id="btn-simulate-crack"
-                onClick={() => triggerManualDefectTest('Crack/Tear')}
-                className="p-2.5 rounded-[6px] bg-[var(--status-critical-bg)] hover:bg-opacity-80 border border-[rgba(241,54,54,0.4)] text-left transition-colors"
-              >
-                <div className="text-[12px] font-semibold text-[var(--status-critical)]">🔴 Crack / Tear</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Score: 90 | Conf: 92%</div>
-              </button>
-
-              <button
-                id="btn-simulate-wear"
-                onClick={() => triggerManualDefectTest('Misalignment/Edge Wear')}
-                className="p-2.5 rounded-[6px] bg-[var(--status-warning-bg)] hover:bg-opacity-80 border border-[rgba(245,158,11,0.4)] text-left transition-colors"
-              >
-                <div className="text-[12px] font-semibold text-[var(--status-warning)]">⚠️ Edge Wear</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Score: 50 | Conf: 78%</div>
-              </button>
-
-              <button
-                id="btn-simulate-normal"
-                onClick={() => triggerManualDefectTest('Normal')}
-                className="p-2.5 rounded-[6px] bg-[var(--bg-surface)] hover:bg-[var(--border-subtle)] border border-[var(--border-subtle)] text-left transition-colors"
-              >
-                <div className="text-[12px] font-semibold text-[var(--status-healthy)]">✓ Reset Normal</div>
-                <div className="text-[11px] text-[var(--text-tertiary)] font-mono">Score: 0 | Clean Belt</div>
-              </button>
+              {[
+                {
+                  id: 'btn-simulate-spillage',
+                  type: 'Material Spillage',
+                  triggerType: 'Material Spillage' as const,
+                  label: 'Material Spillage',
+                  icon: '🟠',
+                  textColor: 'text-orange-400',
+                  baseBorder: 'border-orange-500/40',
+                  activeBorder: 'border-orange-500',
+                  baseBg: 'bg-orange-950/40 hover:bg-orange-900/50',
+                  activeBg: 'bg-orange-950/80',
+                },
+                {
+                  id: 'btn-simulate-crack',
+                  type: 'Crack / Tear',
+                  triggerType: 'Crack/Tear' as const,
+                  label: 'Crack / Tear',
+                  icon: '🔴',
+                  textColor: 'text-[var(--status-critical)]',
+                  baseBorder: 'border-[rgba(241,54,54,0.4)]',
+                  activeBorder: 'border-[var(--status-critical)]',
+                  baseBg: 'bg-[var(--status-critical-bg)] hover:bg-opacity-80',
+                  activeBg: 'bg-[rgba(241,54,54,0.3)]',
+                },
+                {
+                  id: 'btn-simulate-wear',
+                  type: 'Edge Wear',
+                  triggerType: 'Misalignment/Edge Wear' as const,
+                  label: 'Edge Wear',
+                  icon: '⚠️',
+                  textColor: 'text-[var(--status-warning)]',
+                  baseBorder: 'border-[rgba(245,158,11,0.4)]',
+                  activeBorder: 'border-[var(--status-warning)]',
+                  baseBg: 'bg-[var(--status-warning-bg)] hover:bg-opacity-80',
+                  activeBg: 'bg-[rgba(245,197,24,0.3)]',
+                },
+                {
+                  id: 'btn-simulate-normal',
+                  type: 'Normal',
+                  triggerType: 'Normal' as const,
+                  label: 'Reset Normal',
+                  icon: '✓',
+                  textColor: 'text-[var(--status-healthy)]',
+                  baseBorder: 'border-[var(--border-subtle)]',
+                  activeBorder: 'border-[var(--status-healthy)]',
+                  baseBg: 'bg-[var(--bg-surface)] hover:bg-[var(--border-subtle)]',
+                  activeBg: 'bg-[rgba(46,204,113,0.22)]',
+                },
+              ].map((btn) => {
+                const isActive = currentCategory === btn.type;
+                return (
+                  <button
+                    key={btn.id}
+                    id={btn.id}
+                    onClick={() => triggerManualDefectTest(btn.triggerType)}
+                    className={`p-2.5 rounded-[6px] border text-left transition-all ${btn.textColor} ${
+                      isActive
+                        ? `${btn.activeBg} ${btn.activeBorder} sim-button--active-blink font-bold`
+                        : `${btn.baseBg} ${btn.baseBorder} opacity-80 hover:opacity-100`
+                    }`}
+                  >
+                    <div className={`text-[12px] font-semibold ${btn.textColor}`}>
+                      {btn.icon} {btn.label}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

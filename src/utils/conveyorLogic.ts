@@ -250,15 +250,323 @@ export function getContributingFactors(data: SensorData): ContributingFactor[] {
     .sort((a, b) => b.impact_percent - a.impact_percent);
 }
 
+export function getUnifiedContributingFactors(
+  sensorData: SensorData,
+  cameraInspection?: CameraInspection
+): ContributingFactor[] {
+  const rawList: {
+    name: string;
+    factor_key: string;
+    pts: number;
+    current_value: number;
+    threshold_exceeded: string;
+    severity: Severity;
+  }[] = [];
+
+  const cameraRisk = cameraInspection ? Number(cameraInspection.camera_risk_score || 0) : 0;
+  if (cameraRisk > 15 && cameraInspection) {
+    const defectLabel =
+      cameraInspection.defect_type && cameraInspection.defect_type !== 'No Defect / Clean Surface'
+        ? cameraInspection.defect_type
+        : 'Optical Surface Anomaly';
+    rawList.push({
+      name: `Visual Line-Scan: ${defectLabel}`,
+      factor_key: 'camera_visual',
+      pts: Math.round(cameraRisk * 0.4 * 2.5),
+      current_value: cameraRisk,
+      threshold_exceeded: `${cameraInspection.confidence}% confidence`,
+      severity: cameraRisk >= 60 ? 'critical' : 'warning',
+    });
+  }
+
+  if (sensorData.temperature > 80) {
+    rawList.push({ name: 'Joint Splice Thermal Excursion', factor_key: 'temperature', pts: 22, current_value: sensorData.temperature, threshold_exceeded: '>80°C', severity: 'critical' });
+  } else if (sensorData.temperature > 60) {
+    rawList.push({ name: 'Elevated Splice Temperature', factor_key: 'temperature', pts: 12, current_value: sensorData.temperature, threshold_exceeded: '>60°C', severity: 'warning' });
+  }
+
+  if (sensorData.vibration > 5) {
+    rawList.push({ name: 'Severe Pulley/Joint Vibration', factor_key: 'vibration', pts: 24, current_value: sensorData.vibration, threshold_exceeded: '>5 mm/s', severity: 'critical' });
+  } else if (sensorData.vibration > 2) {
+    rawList.push({ name: 'Splice Chatter Harmonic Vibration', factor_key: 'vibration', pts: 12, current_value: sensorData.vibration, threshold_exceeded: '>2 mm/s', severity: 'warning' });
+  }
+
+  if (sensorData.overload > 100) {
+    rawList.push({ name: 'Tonnage Conveyor Overload', factor_key: 'overload', pts: 18, current_value: sensorData.overload, threshold_exceeded: '>100%', severity: 'critical' });
+  } else if (sensorData.overload > 90) {
+    rawList.push({ name: 'Ore Chute Tonnage Strain', factor_key: 'overload', pts: 10, current_value: sensorData.overload, threshold_exceeded: '>90%', severity: 'warning' });
+  }
+
+  if (sensorData.bearing_condition < 40) {
+    rawList.push({ name: 'Critical Bearing Degradation', factor_key: 'bearing_condition', pts: 22, current_value: sensorData.bearing_condition, threshold_exceeded: '<40 pts', severity: 'critical' });
+  } else if (sensorData.bearing_condition < 60) {
+    rawList.push({ name: 'Bearing Acoustic Shock Wear', factor_key: 'bearing_condition', pts: 12, current_value: sensorData.bearing_condition, threshold_exceeded: '<60 pts', severity: 'warning' });
+  }
+
+  if (sensorData.looseness > 0.7) {
+    rawList.push({ name: 'Excessive Belt Sag / Slack Tension', factor_key: 'looseness', pts: 14, current_value: sensorData.looseness, threshold_exceeded: '>0.70', severity: 'critical' });
+  } else if (sensorData.looseness > 0.5) {
+    rawList.push({ name: 'Take-Up Tension Slack', factor_key: 'looseness', pts: 7, current_value: sensorData.looseness, threshold_exceeded: '>0.50', severity: 'warning' });
+  }
+
+  if (sensorData.motion_change > 5) {
+    rawList.push({ name: 'Frequent Cyclic Start-Stop Fatigue', factor_key: 'motion_change', pts: 12, current_value: sensorData.motion_change, threshold_exceeded: '>5/hr', severity: 'critical' });
+  } else if (sensorData.motion_change > 3) {
+    rawList.push({ name: 'Dynamic Motion Transients', factor_key: 'motion_change', pts: 6, current_value: sensorData.motion_change, threshold_exceeded: '>3/hr', severity: 'warning' });
+  }
+
+  if (sensorData.acceleration > 3) {
+    rawList.push({ name: 'Ore Chute Kinetic Impact Jerk', factor_key: 'acceleration', pts: 10, current_value: sensorData.acceleration, threshold_exceeded: '>3 m/s²', severity: 'critical' });
+  }
+
+  if (rawList.length > 0) {
+    // If only 1 anomaly, supplement with operating baseline factors to give complete SHAP breakdown
+    if (rawList.length === 1) {
+      rawList.push({
+        name: 'Drive Pulley Dynamic Load',
+        factor_key: 'motor_current',
+        pts: 8,
+        current_value: sensorData.motor_current,
+        threshold_exceeded: `${sensorData.motor_current.toFixed(0)} A (Nominal)`,
+        severity: 'healthy',
+      });
+      rawList.push({
+        name: 'Haulage Velocity Sync',
+        factor_key: 'belt_speed',
+        pts: 6,
+        current_value: sensorData.belt_speed,
+        threshold_exceeded: `${sensorData.belt_speed.toFixed(2)} m/s (Nominal)`,
+        severity: 'healthy',
+      });
+    }
+
+    const totalPts = rawList.reduce((sum, f) => sum + f.pts, 0);
+    const sorted = [...rawList].sort((a, b) => b.pts - a.pts);
+    let remaining = 100;
+    return sorted.map((item, idx) => {
+      const isLast = idx === sorted.length - 1;
+      const pct = isLast ? Math.max(1, remaining) : Math.max(1, Math.round((item.pts / totalPts) * 100));
+      remaining = Math.max(0, remaining - pct);
+      return {
+        name: item.name,
+        factor_key: item.factor_key,
+        impact_percent: pct,
+        current_value: item.current_value,
+        threshold_exceeded: item.threshold_exceeded,
+        severity: item.severity,
+      };
+    });
+  }
+
+  // Pure nominal baseline state - balanced 25% across all 4 operational vectors
+  return [
+    {
+      name: 'Belt Carcass & Splice Integrity',
+      factor_key: 'splice_integrity',
+      impact_percent: 25,
+      current_value: 98,
+      threshold_exceeded: 'Nominal (Zero Delamination)',
+      severity: 'healthy',
+    },
+    {
+      name: 'Drive Pulley & Bearing Mechanics',
+      factor_key: 'bearing_condition',
+      impact_percent: 25,
+      current_value: sensorData.bearing_condition || 88,
+      threshold_exceeded: `${sensorData.bearing_condition || 88} pts (Healthy)`,
+      severity: 'healthy',
+    },
+    {
+      name: 'Tonnage & Speed Synchronization',
+      factor_key: 'belt_speed',
+      impact_percent: 25,
+      current_value: sensorData.belt_speed || 4.2,
+      threshold_exceeded: `${(sensorData.belt_speed || 4.2).toFixed(2)} m/s (Balanced)`,
+      severity: 'healthy',
+    },
+    {
+      name: 'Optical Line-Scan Camera Surface',
+      factor_key: 'camera_visual',
+      impact_percent: 25,
+      current_value: cameraRisk,
+      threshold_exceeded: 'Clean Flange / Nominal Tracking',
+      severity: 'healthy',
+    },
+  ];
+}
+
+export interface MonitoredSegmentData {
+  id: string;
+  name: string;
+  shortName: string;
+  spliceType: string;
+  location: string;
+  monitoredSensors: string;
+  baselineRulHours: number;
+  failureMode: string;
+  installationDate: string;
+  cumulativeHours: number;
+  degradationRate: string;
+  riskScore: number;
+  failureProbability: number;
+  rulHours: number;
+  status: 'Healthy' | 'Warning' | 'Critical';
+  recommendation: string;
+  contributingFactors: ContributingFactor[];
+}
+
+export function evaluateSegmentPredictions(
+  sensorData: SensorData,
+  cameraInspection: CameraInspection
+): Record<string, MonitoredSegmentData> {
+  const sensorRisk = calculateSensorRiskScore(sensorData);
+  const cameraRisk = cameraInspection.camera_risk_score;
+
+  // J-102: ST-4500 Splice (directly passes line-scan camera #1 and drive pulley)
+  const j102Risk = Math.round((0.6 * sensorRisk + 0.4 * cameraRisk) * 10) / 10;
+  const j102Status = getStatusFromScore(j102Risk);
+  let j102Rul = 640;
+  if (j102Risk >= 60) {
+    j102Rul = Math.max(2, Math.round(24 - (j102Risk - 60) * 0.45));
+  } else if (j102Risk >= 30) {
+    j102Rul = Math.max(36, Math.round(180 - (j102Risk - 30) * 3.5));
+  } else {
+    j102Rul = Math.max(350, Math.round(650 - j102Risk * 8));
+  }
+  const j102Factors = getUnifiedContributingFactors(sensorData, cameraInspection);
+  let j102Rec = 'Conveyor belt operating within nominal parameters. Continue routine scheduled shift inspection.';
+  if (j102Status === 'Critical') {
+    j102Rec = `CRITICAL ALERT: Immediate automated speed reduction or controlled stop recommended. ${
+      cameraRisk >= 50 ? `Optical feed confirmed ${cameraInspection.defect_type}. ` : ''
+    }Dispatch electrical and mechanical rigging crew to inspect drive pulley & joint splices.`;
+  } else if (j102Status === 'Warning') {
+    j102Rec = `WARNING: Accelerated splice wear or thermal excursion detected. Schedule non-destructive testing (NDT) at next shift break and verify belt tension take-up.`;
+  }
+
+  // J-101: Finger Splice (near tail pulley gravity take-up; sensitized to tension looseness & speed slip)
+  let j101Risk = Math.round(sensorRisk * 0.7);
+  if (sensorData.looseness > 0.65) j101Risk += 28;
+  else if (sensorData.looseness > 0.5) j101Risk += 14;
+  if (sensorData.belt_speed < 3.5) j101Risk += 20;
+  else if (sensorData.belt_speed < 3.8) j101Risk += 10;
+  if (sensorData.vibration > 3.0) j101Risk += 15;
+  j101Risk = Math.min(100, Math.max(4, j101Risk));
+  const j101Status = getStatusFromScore(j101Risk);
+  let j101Rul = 680;
+  if (j101Risk >= 60) {
+    j101Rul = Math.max(4, Math.round(28 - (j101Risk - 60) * 0.5));
+  } else if (j101Risk >= 30) {
+    j101Rul = Math.max(42, Math.round(210 - (j101Risk - 30) * 4.0));
+  } else {
+    j101Rul = Math.max(380, Math.round(680 - j101Risk * 7.2));
+  }
+  const j101Factors = getUnifiedContributingFactors(sensorData, {
+    ...cameraInspection,
+    camera_risk_score: Math.round(cameraRisk * 0.25), // J-101 is at tail pulley, camera is at drive
+  });
+  let j101Rec = 'Tail pulley finger splice operating within nominal tension elasticity limits.';
+  if (j101Status === 'Critical') {
+    j101Rec = 'CRITICAL ALERT: Finger splice step separation risk at tail wrap. Inspect gravity take-up carriage guide alignment and check splice fingers for chord delamination.';
+  } else if (j101Status === 'Warning') {
+    j101Rec = 'WARNING: Dynamic tension fluctuation detected at tail return. Verify take-up counterweight free travel and inspect acoustic emission signatures.';
+  }
+
+  // SEC-B: Impact Cradle Section (under primary crusher discharge; sensitized to overload & chute acceleration)
+  let secBRisk = Math.round(sensorRisk * 0.65);
+  if (sensorData.overload > 100) secBRisk += 28;
+  else if (sensorData.overload > 90) secBRisk += 14;
+  if (sensorData.acceleration > 2.2) secBRisk += 22;
+  else if (sensorData.acceleration > 1.5) secBRisk += 10;
+  if (sensorData.temperature > 65) secBRisk += 15;
+  secBRisk = Math.min(100, Math.max(5, secBRisk));
+  const secBStatus = getStatusFromScore(secBRisk);
+  let secBRul = 640;
+  if (secBRisk >= 60) {
+    secBRul = Math.max(3, Math.round(20 - (secBRisk - 60) * 0.45));
+  } else if (secBRisk >= 30) {
+    secBRul = Math.max(38, Math.round(195 - (secBRisk - 30) * 3.8));
+  } else {
+    secBRul = Math.max(360, Math.round(640 - secBRisk * 7.5));
+  }
+  const secBFactors = getUnifiedContributingFactors(sensorData, {
+    ...cameraInspection,
+    camera_risk_score: Math.round(cameraRisk * 0.6),
+  });
+  let secBRec = 'Loading zone impact bed and troughing idlers absorbing dynamic ore drop nominal force.';
+  if (secBStatus === 'Critical') {
+    secBRec = 'CRITICAL ALERT: High-tonnage chute choke or boulder puncture hazard in Section B cradle. De-rate vibrating feeder immediately and inspect impact idler polyurethane cushions.';
+  } else if (secBStatus === 'Warning') {
+    secBRec = 'WARNING: Heavy impact dynamic shock detected under crusher transfer point. Inspect skirt rubber seals and check center idler roll bearings.';
+  }
+
+  return {
+    'J-102': {
+      id: 'J-102',
+      name: 'Vulcanized Joint Splice #2 (ST-4500)',
+      shortName: 'Splice J-102',
+      spliceType: 'Hot Vulcanized Steel Cord (ST-4500)',
+      location: '142m from Head Drive (Direct Camera Inspection Zone)',
+      monitoredSensors: 'Line-Scan Camera + Thermal IR + Acoustic Shock',
+      baselineRulHours: 640,
+      failureMode: cameraRisk > 50 ? `${cameraInspection.defect_type} along Steel Cord Core` : 'Longitudinal Cord Pullout & Splice Interface Fatigue',
+      installationDate: '2025-11-14',
+      cumulativeHours: 4820,
+      degradationRate: j102Status === 'Critical' ? '-0.85 pts/hr' : j102Status === 'Warning' ? '-0.38 pts/hr' : '-0.06 pts/hr',
+      riskScore: j102Risk,
+      failureProbability: Math.min(99, Math.max(3, Math.round(j102Risk * 0.96))),
+      rulHours: j102Rul,
+      status: j102Status,
+      recommendation: j102Rec,
+      contributingFactors: j102Factors,
+    },
+    'J-101': {
+      id: 'J-101',
+      name: 'Vulcanized Joint Splice #1 (Finger)',
+      shortName: 'Splice J-101',
+      spliceType: 'Multi-Ply Fabric Finger Splice',
+      location: '48m before Tail Pulley Tension Carriage',
+      monitoredSensors: 'Acoustic Emission + Tachometer Slip + Belt Looseness',
+      baselineRulHours: 680,
+      failureMode: 'Multi-Ply Finger Splice Root Peeling & Tail Pulley Flex Fatigue',
+      installationDate: '2026-01-20',
+      cumulativeHours: 3240,
+      degradationRate: j101Status === 'Critical' ? '-0.70 pts/hr' : j101Status === 'Warning' ? '-0.28 pts/hr' : '-0.05 pts/hr',
+      riskScore: j101Risk,
+      failureProbability: Math.min(99, Math.max(3, Math.round(j101Risk * 0.95))),
+      rulHours: j101Rul,
+      status: j101Status,
+      recommendation: j101Rec,
+      contributingFactors: j101Factors,
+    },
+    'SEC-B': {
+      id: 'SEC-B',
+      name: 'Belt Section B (Impact Cradle)',
+      shortName: 'Impact Cradle B',
+      spliceType: 'Reinforced Heavy-Duty Impact Troughing Bed',
+      location: '0m - 28m under Primary Crusher Transfer Chute',
+      monitoredSensors: 'Ultrasonic Bed Sag + Kinetic Shock + Tonnage Overload',
+      baselineRulHours: 640,
+      failureMode: 'Carcass Puncture, Heavy Idler Pinching & Chute Choke',
+      installationDate: '2025-08-10',
+      cumulativeHours: 6150,
+      degradationRate: secBStatus === 'Critical' ? '-0.95 pts/hr' : secBStatus === 'Warning' ? '-0.42 pts/hr' : '-0.07 pts/hr',
+      riskScore: secBRisk,
+      failureProbability: Math.min(99, Math.max(4, Math.round(secBRisk * 0.96))),
+      rulHours: secBRul,
+      status: secBStatus,
+      recommendation: secBRec,
+      contributingFactors: secBFactors,
+    },
+  };
+}
+
 export function evaluateSensorPrediction(data: SensorData): SensorPrediction {
   const riskScore = calculateSensorRiskScore(data);
   const status = getStatusFromScore(riskScore);
-  const contributing = getContributingFactors(data);
+  const contributing = getUnifiedContributingFactors(data);
   
-  // Failure probability roughly scales with risk score
-  const failureProb = Math.min(99, Math.max(2, Math.round(riskScore * 0.95 + (Math.random() * 4 - 2))));
+  const failureProb = Math.min(99, Math.max(2, Math.round(riskScore * 0.95)));
   
-  // Estimated RUL: Healthy > 500h, Warning 72-200h, Critical < 24h
   let rulHours = 720;
   if (riskScore >= 60) {
     rulHours = Math.max(4, Math.round(36 - (riskScore - 60) * 0.7));
@@ -290,17 +598,7 @@ export function evaluateCombinedPrediction(
   const finalScore = Math.round((0.6 * sensorRisk + 0.4 * cameraRisk) * 10) / 10;
   const status = getStatusFromScore(finalScore);
   
-  const contributing = getContributingFactors(sensorData);
-  if (cameraRisk > 20) {
-    contributing.unshift({
-      name: `Visual Inspection: ${cameraInspection.defect_type}`,
-      factor_key: 'camera_visual',
-      impact_percent: Math.round((cameraRisk * 0.4 / (finalScore || 1)) * 100),
-      current_value: cameraRisk,
-      threshold_exceeded: `${cameraInspection.confidence}% confidence`,
-      severity: cameraRisk >= 60 ? 'critical' : 'warning',
-    });
-  }
+  const contributing = getUnifiedContributingFactors(sensorData, cameraInspection);
 
   // Calculate RUL based on combined risk
   let rulHours = 640;
