@@ -139,7 +139,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             )}
           </div>
 
-          {/* 2. Notification Bell Icon with alert badge */}
+          {/* Notification Bell Icon with alert badge */}
           <button
             id="top-bell-alerts"
             onClick={onNavigateToAlerts}
