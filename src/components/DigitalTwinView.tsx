@@ -381,12 +381,29 @@ export const DigitalTwinView: React.FC<DigitalTwinViewProps> = ({
       <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-[12px] p-[20px] shadow-[var(--shadow-card)] relative overflow-hidden">
         {/* Canvas Top Controls */}
         <div className="flex items-center justify-between text-[12px] text-[var(--text-tertiary)] mb-4 pb-3 border-b border-[var(--border-subtle)]">
-          <div className="flex items-center gap-3 font-mono">
+          <div className="flex items-center gap-3 font-mono flex-wrap">
             <span className="text-[var(--text-primary)] font-semibold">SYSTEM: CV-101 (2.4 km Overland)</span>
             <span className="text-[var(--text-disabled)] hidden sm:inline">•</span>
             <span className="text-[var(--accent-primary)] font-bold">
               SPEED: {sensorData.belt_speed.toFixed(2)} m/s {isMoving ? '(RUNNING)' : '(STOPPED)'}
             </span>
+            <span className="text-[var(--text-disabled)] hidden sm:inline">•</span>
+            {detection.defectType === 'Crack/Tear' ? (
+              <span className="px-2 py-0.5 rounded-[4px] bg-red-950/80 border border-red-500/80 text-red-300 font-mono text-[11px] font-bold flex items-center gap-1.5 animate-pulse">
+                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
+                CAM 1: CRACK/TEAR ({detection.confidence}%)
+              </span>
+            ) : detection.defectType === 'Material Spillage' ? (
+              <span className="px-2 py-0.5 rounded-[4px] bg-orange-950/80 border border-orange-500/80 text-orange-300 font-mono text-[11px] font-bold flex items-center gap-1.5 animate-pulse">
+                <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-ping" />
+                CAM 1: MATERIAL SPILLAGE ({detection.confidence}%)
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded-[4px] bg-emerald-950/40 border border-emerald-500/30 text-emerald-400 font-mono text-[11px] flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                CAM 1: NORMAL
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <button

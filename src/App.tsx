@@ -352,12 +352,12 @@ export default function App() {
                   />
                 )}
 
-                {currentPage === 'camera' && (
+                <div className={currentPage === 'camera' ? 'block' : 'hidden'}>
                   <CameraInspectionView
                     sensorData={sensorData}
                     onUpdateCombinedPrediction={handleUpdateCameraPrediction}
                   />
-                )}
+                </div>
 
                 {currentPage === 'digital-twin' && (
                   <DigitalTwinView

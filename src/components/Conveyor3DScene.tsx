@@ -34,23 +34,23 @@ function getSeverityColor(sev: Severity): string {
   }
 }
 
-// Spillage Debris falling off the edge at Joint 1 / transfer point when Material Spillage is detected
+// Spillage Debris falling off the edge & underneath at Joint 1 / transfer point when Material Spillage is detected
 const SpillageDebrisParticles: React.FC<{ active: boolean }> = ({ active }) => {
   const meshRef = useRef<THREE.InstancedMesh | null>(null);
-  const count = 28;
+  const count = 46;
   const dummy = useMemo(() => new THREE.Object3D(), []);
   const particles = useMemo(() => {
     return Array.from({ length: count }, () => ({
-      x: -1.8 + (Math.random() - 0.5) * 1.8,
-      y: 0.85 + Math.random() * 0.1,
-      z: 0.95 + Math.random() * 0.35,
-      vy: -0.035 - Math.random() * 0.04,
-      vx: (Math.random() - 0.5) * 0.015,
-      vz: 0.018 + Math.random() * 0.025,
-      scale: 0.045 + Math.random() * 0.05,
+      x: -1.8 + (Math.random() - 0.5) * 1.6,
+      y: 0.85 + Math.random() * 0.15,
+      z: (Math.random() - 0.5) * 1.7,
+      vy: -0.045 - Math.random() * 0.05,
+      vx: (Math.random() - 0.5) * 0.02,
+      vz: (Math.random() - 0.5) * 0.025 + 0.015,
+      scale: 0.04 + Math.random() * 0.055,
       rot: Math.random() * Math.PI,
     }));
-  }, []);
+  }, [count]);
 
   useFrame(() => {
     if (!meshRef.current || !active) return;
@@ -58,11 +58,11 @@ const SpillageDebrisParticles: React.FC<{ active: boolean }> = ({ active }) => {
       p.y += p.vy;
       p.x += p.vx;
       p.z += p.vz;
-      p.rot += 0.04;
-      if (p.y < -1.0) {
-        p.y = 0.85 + Math.random() * 0.1;
-        p.x = -1.8 + (Math.random() - 0.5) * 1.8;
-        p.z = 0.95 + Math.random() * 0.2;
+      p.rot += 0.05;
+      if (p.y < -1.65) {
+        p.y = 0.85 + Math.random() * 0.15;
+        p.x = -1.8 + (Math.random() - 0.5) * 1.6;
+        p.z = (Math.random() - 0.5) * 1.7;
       }
       dummy.position.set(p.x, p.y, p.z);
       dummy.scale.set(p.scale, p.scale, p.scale);
@@ -82,9 +82,151 @@ const SpillageDebrisParticles: React.FC<{ active: boolean }> = ({ active }) => {
         color="#ea580c"
         roughness={0.9}
         emissive="#c2410c"
-        emissiveIntensity={0.8}
+        emissiveIntensity={0.85}
       />
     </instancedMesh>
+  );
+};
+
+// Spilled Iron Ore Accumulation Mound on Floor with Hazard Warning Indicator
+const SpillageFloorPile: React.FC<{ active: boolean; confidence?: number }> = ({ active, confidence }) => {
+  const lightRef = useRef<THREE.PointLight | null>(null);
+
+  useFrame((state) => {
+    if (!active) return;
+    const t = state.clock.getElapsedTime();
+    if (lightRef.current) {
+      lightRef.current.intensity = 1.8 + Math.sin(t * 6) * 0.8;
+    }
+  });
+
+  if (!active) return null;
+
+  return (
+    <group position={[-1.8, -1.65, 0]}>
+      {/* Amber Hazard Illumination */}
+      <pointLight ref={lightRef} position={[0, 0.8, 0.35]} color="#f97316" intensity={2.2} distance={4.5} />
+
+      {/* Main Spilled Ore Mound on Concrete Ground */}
+      <mesh position={[0, 0.08, 0.35]}>
+        <coneGeometry args={[0.85, 0.28, 16]} />
+        <meshStandardMaterial
+          color="#7c2d12"
+          roughness={0.9}
+          metalness={0.2}
+          emissive="#c2410c"
+          emissiveIntensity={0.4}
+        />
+      </mesh>
+
+      {/* Secondary Spilled Rock Clumps */}
+      <mesh position={[0.32, 0.05, 0.6]}>
+        <dodecahedronGeometry args={[0.16, 0]} />
+        <meshStandardMaterial color="#9a3412" roughness={0.9} emissive="#ea580c" emissiveIntensity={0.5} />
+      </mesh>
+      <mesh position={[-0.35, 0.06, 0.2]}>
+        <dodecahedronGeometry args={[0.19, 0]} />
+        <meshStandardMaterial color="#9a3412" roughness={0.9} emissive="#ea580c" emissiveIntensity={0.5} />
+      </mesh>
+      <mesh position={[0.1, 0.04, -0.2]}>
+        <dodecahedronGeometry args={[0.15, 0]} />
+        <meshStandardMaterial color="#9a3412" roughness={0.9} emissive="#ea580c" emissiveIntensity={0.5} />
+      </mesh>
+
+      {/* Hazard Perimeter Ring Decal on Floor */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0.35]}>
+        <ringGeometry args={[0.95, 1.12, 32]} />
+        <meshStandardMaterial
+          color="#f97316"
+          emissive="#ea580c"
+          emissiveIntensity={1.3}
+          transparent
+          opacity={0.8}
+        />
+      </mesh>
+
+      {/* Floating 3D Spillage Warning Badge */}
+      <Html position={[0, 0.75, 0.35]} center distanceFactor={14}>
+        <div className="px-2.5 py-1 rounded-[4px] bg-orange-950/95 border-2 border-orange-500 text-orange-100 text-[11px] font-mono whitespace-nowrap pointer-events-none shadow-2xl flex items-center gap-1.5 backdrop-blur-md animate-pulse">
+          <span className="w-2 h-2 rounded-full bg-orange-500 animate-ping" />
+          <span className="font-bold">⚠️ MATERIAL SPILLAGE ZONE ({confidence || 88}%)</span>
+        </div>
+      </Html>
+    </group>
+  );
+};
+
+// 3D Conveyor Belt Crack / Longitudinal Tear Visual directly on belt top strand
+const BeltCrackTearVisual: React.FC<{ active: boolean; confidence?: number }> = ({ active, confidence }) => {
+  const pulseLightRef = useRef<THREE.PointLight | null>(null);
+  const coreMatRef = useRef<THREE.MeshStandardMaterial | null>(null);
+
+  useFrame((state) => {
+    if (!active) return;
+    const t = state.clock.getElapsedTime();
+    const intensity = 2.0 + Math.sin(t * 8) * 1.0;
+    if (pulseLightRef.current) {
+      pulseLightRef.current.intensity = intensity;
+    }
+    if (coreMatRef.current) {
+      coreMatRef.current.emissiveIntensity = intensity;
+    }
+  });
+
+  if (!active) return null;
+
+  return (
+    <group position={[-1.8, 0.85, 0]} rotation={[0, 0, -0.05]}>
+      {/* Pulsing Critical Red Incident Light */}
+      <pointLight ref={pulseLightRef} position={[0, 0.6, 0]} color="#ef4444" intensity={2.8} distance={3.8} />
+
+      {/* Deep Rubber Rupture Void (Dark Carcass Separation Trench) */}
+      <mesh position={[0, 0.02, 0]}>
+        <boxGeometry args={[0.68, 0.06, 1.48]} />
+        <meshStandardMaterial color="#05080c" roughness={0.95} />
+      </mesh>
+
+      {/* High-Stress Internal Tear Core (Pulsing Critical Red) */}
+      <mesh position={[0, 0.025, 0]}>
+        <boxGeometry args={[0.58, 0.055, 1.28]} />
+        <meshStandardMaterial
+          ref={coreMatRef}
+          color="#991b1b"
+          emissive="#ef4444"
+          emissiveIntensity={2.2}
+          roughness={0.4}
+        />
+      </mesh>
+
+      {/* Broken Internal Steel Cord Filaments exposed across the tear */}
+      {[-0.48, -0.22, 0.1, 0.38].map((z, idx) => (
+        <mesh key={idx} position={[idx % 2 === 0 ? -0.08 : 0.08, 0.03, z]} rotation={[0, 0, 0.4 * (idx % 2 === 0 ? 1 : -1)]}>
+          <cylinderGeometry args={[0.014, 0.014, 0.26, 12]} />
+          <meshStandardMaterial color="#cbd5e1" metalness={0.9} roughness={0.2} />
+        </mesh>
+      ))}
+
+      {/* 3D Holographic Red Inspection Bounding Frame around the Crack */}
+      <mesh position={[0, 0.06, 0]}>
+        <boxGeometry args={[0.88, 0.2, 1.64]} />
+        <meshStandardMaterial
+          color="#ef4444"
+          wireframe
+          transparent
+          opacity={0.88}
+          emissive="#ef4444"
+          emissiveIntensity={1.8}
+        />
+      </mesh>
+
+      {/* Floating 3D Defect Inspection Badge */}
+      <Html position={[0, 0.7, 0]} center distanceFactor={14}>
+        <div className="px-2.5 py-1 rounded-[4px] bg-red-950/95 border-2 border-red-500 text-red-100 text-[11px] font-mono whitespace-nowrap pointer-events-none shadow-2xl flex items-center gap-1.5 backdrop-blur-md animate-pulse">
+          <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+          <span className="font-bold">🔴 CRITICAL CRACK / TEAR ({confidence || 94}%)</span>
+        </div>
+      </Html>
+    </group>
   );
 };
 
@@ -218,6 +360,11 @@ const AnimatedBelt: React.FC<{
     <group>
       {/* 3D Spillage Debris Particles near Joint 1 */}
       <SpillageDebrisParticles active={cameraDefectType === 'Material Spillage'} />
+      {/* 3D Spillage Mound & Hazard Area on Floor */}
+      <SpillageFloorPile active={cameraDefectType === 'Material Spillage'} confidence={cameraDefectConfidence} />
+
+      {/* 3D Belt Crack / Tear Visual directly on belt top strand */}
+      <BeltCrackTearVisual active={cameraDefectType === 'Crack/Tear'} confidence={cameraDefectConfidence} />
 
       {/* Top Conveyor Belt Strand (Transport surface) */}
       <mesh ref={topStrandRef} position={[0, 0.8, 0]} rotation={[0, 0, -0.05]}>
@@ -275,34 +422,18 @@ const AnimatedBelt: React.FC<{
           roughness={0.3}
           metalness={0.4}
         />
-        {(hoveredJ1 || activeHighlight === 'joint_1' || joint1Severity !== 'healthy' || isCameraDefectOnJ1) && (
+        {(hoveredJ1 || activeHighlight === 'joint_1' || (joint1Severity !== 'healthy' && cameraDefectType !== 'Crack/Tear' && cameraDefectType !== 'Material Spillage')) && (
           <Html position={[0, 0.6, 0]} center distanceFactor={14}>
             <div
               className={`px-2.5 py-1 rounded-[4px] border text-white text-[11px] font-mono whitespace-nowrap pointer-events-none shadow-xl flex items-center gap-1.5 backdrop-blur-md ${
-                cameraDefectType === 'Material Spillage'
-                  ? 'bg-orange-950/90 border-orange-500 text-orange-200 animate-pulse'
-                  : cameraDefectType === 'Crack/Tear'
-                  ? 'bg-red-950/90 border-red-500 text-red-200 animate-pulse'
-                  : cameraDefectType === 'Misalignment/Edge Wear'
-                  ? 'bg-amber-950/90 border-amber-500 text-amber-200'
-                  : joint1Severity === 'critical'
+                joint1Severity === 'critical'
                   ? 'bg-red-950/90 border-red-500 text-red-200'
                   : joint1Severity === 'warning'
                   ? 'bg-amber-950/90 border-amber-500 text-amber-200'
                   : 'bg-black/90 border-white/20'
               }`}
             >
-              {cameraDefectType === 'Material Spillage' ? (
-                <span>⚠️ Material Spillage ({cameraDefectConfidence || 84}%)</span>
-              ) : cameraDefectType === 'Crack/Tear' ? (
-                <span>🔴 Crack/Tear ({cameraDefectConfidence || 91}%)</span>
-              ) : cameraDefectType === 'Misalignment/Edge Wear' ? (
-                <span>⚠️ Edge Wear ({cameraDefectConfidence || 78}%)</span>
-              ) : (
-                <>
-                  <span className="font-bold text-[var(--accent-primary)]">Joint Splice #1</span> ({joint1Severity.toUpperCase()})
-                </>
-              )}
+              <span className="font-bold text-[var(--accent-primary)]">Joint Splice #1</span> ({joint1Severity.toUpperCase()})
             </div>
           </Html>
         )}
